@@ -1,0 +1,47 @@
+name: 'Detect New Policy Versions'
+description: 'Detect new policy versions from git changes'
+
+inputs:
+  base-sha:
+    description: 'Base SHA for comparison'
+    required: true
+  head-sha:
+    description: 'Head SHA for comparison'
+    required: true
+
+outputs:
+  new-versions:
+    description: 'Space-separated list of new policy versions (policy/version format)'
+    value: ${{ steps.detect.outputs.new_versions }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect new versions
+      id: detect
+      run: |
+        echo "🔍 Detecting new policy versions..."
+
+        # Get added files in policies/
+        added_files=$(git diff --name-only --diff-filter=A "${{ inputs.base-sha }}" "${{ inputs.head-sha }}" | grep '^policies/' | sort | uniq)
+
+        new_versions=""
+        for file in $added_files; do
+          if [[ $file =~ ^policies/([^/]+)/([^/]+)/ ]]; then
+            version_path="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+            if [[ ! " $new_versions " =~ " $version_path " ]]; then
+              new_versions="$new_versions $version_path"
+            fi
+          fi
+        done
+
+        new_versions=$(echo $new_versions | tr ' ' '\n' | sort | uniq)
+        echo "new_versions=$new_versions" >> $GITHUB_OUTPUT
+
+        if [ -n "$new_versions" ]; then
+          echo "📦 New versions detected:"
+          echo "$new_versions" | tr ' ' '\n' | sed 's/^/- /'
+        else
+          echo "ℹ️  No new policy versions detected"
+        fi
+      shell: bash

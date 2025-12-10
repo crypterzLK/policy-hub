@@ -1,0 +1,11 @@
+{
+  "name": "sample-policy",
+  "version": "v1.0.0",
+  "description": "Sample policy demonstrating the Policy Hub structure",
+  "author": "Policy Hub Team",
+  "tags": ["sample", "demo", "authentication"],
+  "compatibility": ">=v1.0.0",
+  "license": "MIT",
+  "repository": "https://github.com/example/policy-hub",
+  "documentation": "https://docs.policyhub.com/sample-policy"
+}

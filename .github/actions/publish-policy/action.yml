@@ -1,0 +1,111 @@
+name: 'Publish Policy'
+description: 'Publish a single policy version to S3 and Policy Hub'
+
+inputs:
+  policy:
+    description: 'Policy name'
+    required: true
+  version:
+    description: 'Policy version'
+    required: true
+  s3-bucket:
+    description: 'S3 bucket name'
+    required: true
+  policy-hub-url:
+    description: 'Policy Hub API URL'
+    required: true
+  repo-url:
+    description: 'GitHub repository URL'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Prepare ZIP
+      id: prepare
+      run: |
+        if ./scripts/prepare-zip.sh "${{ inputs.policy }}" "${{ inputs.version }}"; then
+          echo "✅ ZIP prepared successfully"
+          echo "success=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ ZIP preparation failed"
+          echo "success=false" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+
+    - name: Upload to S3
+      id: upload
+      if: steps.prepare.outputs.success == 'true'
+      run: |
+        zip_file="${{ inputs.policy }}-${{ inputs.version }}.zip"
+        s3_path="s3://${{ inputs.s3-bucket }}/policies/$zip_file"
+        if aws s3 cp "$zip_file" "$s3_path" --no-progress; then
+          echo "✅ Uploaded to $s3_path"
+          echo "success=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ S3 upload failed"
+          echo "success=false" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+
+    - name: Sync with Policy Hub
+      id: sync
+      if: steps.upload.outputs.success == 'true'
+      run: |
+        policy_dir="policies/${{ inputs.policy }}/${{ inputs.version }}"
+
+        # Read metadata
+        if [ -f "$policy_dir/metadata.json" ]; then
+          metadata=$(cat "$policy_dir/metadata.json")
+        else
+          echo "⚠️  metadata.json not found, using empty object"
+          metadata="{}"
+        fi
+
+        # Construct API payload
+        payload=$(cat <<EOF
+{
+  "policyName": "${{ inputs.policy }}",
+  "version": "${{ inputs.version }}",
+  "sourceType": "github",
+  "sourceUrl": "${{ inputs.repo-url }}",
+  "definitionUrl": "${{ inputs.repo-url }}/raw/main/$policy_dir/policy-definition.yaml",
+  "metadata": $metadata,
+  "docsBaseUrl": "${{ inputs.repo-url }}/raw/main/$policy_dir/docs/",
+  "assetsBaseUrl": "${{ inputs.repo-url }}/raw/main/$policy_dir/assets/"
+}
+EOF
+)
+
+        sync_url="${{ inputs.policy-hub-url }}/sync"
+        if curl -X POST "$sync_url" \
+          -H "Authorization: Bearer $POLICY_HUB_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d "$payload" \
+          --fail --silent --show-error --max-time 30; then
+          echo "✅ Synced with Policy Hub"
+          echo "success=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Policy Hub sync failed"
+          echo "success=false" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+      env:
+        POLICY_HUB_API_KEY: ${{ secrets.POLICY_HUB_API_KEY }}
+
+    - name: Cleanup
+      if: always()
+      run: rm -f "${{ inputs.policy }}-${{ inputs.version }}.zip"
+      shell: bash
+
+    - name: Set final result
+      id: result
+      run: |
+        if [[ "${{ steps.prepare.outputs.success }}" == "true" && \
+              "${{ steps.upload.outputs.success }}" == "true" && \
+              "${{ steps.sync.outputs.success }}" == "true" ]]; then
+          echo "success=true" >> $GITHUB_OUTPUT
+        else
+          echo "success=false" >> $GITHUB_OUTPUT
+        fi
+      shell: bash

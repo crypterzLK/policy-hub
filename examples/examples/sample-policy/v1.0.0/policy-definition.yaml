@@ -1,0 +1,57 @@
+apiVersion: policy/v1
+kind: Policy
+metadata:
+  name: sample-policy
+  version: v1.0.0
+  description: Sample policy for demonstration purposes
+  labels:
+    category: authentication
+    priority: medium
+spec:
+  rules:
+    - name: authenticated-access
+      description: Allow access for authenticated users
+      priority: 100
+      condition: |
+        request.authenticated == true &&
+        request.blocked != true
+      action: allow
+      onMatch:
+        log: "Access granted for authenticated user"
+
+    - name: block-suspicious
+      description: Block access from suspicious sources
+      priority: 200
+      condition: |
+        request.suspicious == true ||
+        request.risk_score > 0.8
+      action: deny
+      onMatch:
+        log: "Access blocked due to suspicious activity"
+        alert: true
+
+    - name: default-deny
+      description: Default deny rule
+      priority: 999
+      condition: "true"
+      action: deny
+      onMatch:
+        log: "Access denied by default policy"
+
+  parameters:
+    - name: risk_threshold
+      type: float
+      default: 0.8
+      description: Risk score threshold for blocking
+
+    - name: enable_alerts
+      type: boolean
+      default: true
+      description: Whether to send alerts on policy violations
+
+  enforcement:
+    mode: enforce
+    logLevel: info
+    metrics:
+      enabled: true
+      interval: 60s

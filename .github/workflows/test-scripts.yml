@@ -1,0 +1,147 @@
+name: Test Scripts
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/test-scripts.yml'
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/test-scripts.yml'
+
+jobs:
+  test-prepare-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create test policy structure
+        run: |
+          mkdir -p test/policies/test-policy/v1.0.0/src
+          mkdir -p test/policies/test-policy/v1.0.0/docs
+          echo 'package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello, Policy!")
+}' > test/policies/test-policy/v1.0.0/src/main.go
+
+          echo '{
+  "name": "test-policy",
+  "version": "v1.0.0",
+  "description": "Test policy for validation"
+}' > test/policies/test-policy/v1.0.0/metadata.json
+
+          echo 'apiVersion: policy/v1
+kind: Policy
+metadata:
+  name: test-policy
+spec:
+  rules:
+    - name: test-rule
+      condition: "true"
+      action: allow' > test/policies/test-policy/v1.0.0/policy-definition.yaml
+
+      - name: Test prepare-zip.sh with valid input
+        run: |
+          cd test
+          if ../scripts/prepare-zip.sh test-policy v1.0.0; then
+            echo "✅ prepare-zip.sh succeeded"
+            if [ -f "test-policy-v1.0.0.zip" ]; then
+              echo "✅ ZIP file created"
+              # Verify ZIP contents
+              unzip -l test-policy-v1.0.0.zip | grep -q "src/main.go"
+              if [ $? -eq 0 ]; then
+                echo "✅ ZIP contains expected files"
+              else
+                echo "❌ ZIP missing expected files"
+                exit 1
+              fi
+            else
+              echo "❌ ZIP file not created"
+              exit 1
+            fi
+          else
+            echo "❌ prepare-zip.sh failed"
+            exit 1
+          fi
+
+      - name: Test prepare-zip.sh with invalid policy name
+        run: |
+          cd test
+          if ../scripts/prepare-zip.sh "test policy" v1.0.0 2>/dev/null; then
+            echo "❌ prepare-zip.sh should have failed with invalid policy name"
+            exit 1
+          else
+            echo "✅ prepare-zip.sh correctly rejected invalid policy name"
+          fi
+
+      - name: Test prepare-zip.sh with invalid version
+        run: |
+          cd test
+          if ../scripts/prepare-zip.sh test-policy "1.0.0" 2>/dev/null; then
+            echo "❌ prepare-zip.sh should have failed with invalid version"
+            exit 1
+          else
+            echo "✅ prepare-zip.sh correctly rejected invalid version"
+          fi
+
+      - name: Test prepare-zip.sh with missing source directory
+        run: |
+          cd test
+          if ../scripts/prepare-zip.sh nonexistent-policy v1.0.0 2>/dev/null; then
+            echo "❌ prepare-zip.sh should have failed with missing directory"
+            exit 1
+          else
+            echo "✅ prepare-zip.sh correctly failed with missing directory"
+          fi
+
+      - name: Cleanup
+        run: rm -rf test
+
+  test-validate-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test validate-config.sh with valid config
+        run: |
+          if ./scripts/validate-config.sh; then
+            echo "✅ validate-config.sh succeeded with valid config"
+          else
+            echo "❌ validate-config.sh failed with valid config"
+            exit 1
+          fi
+
+      - name: Test validate-config.sh with invalid JSON
+        run: |
+          echo '{"invalid": json' > config/test-config.json
+          mv config/policy-hub-config.json config/policy-hub-config.json.backup
+          mv config/test-config.json config/policy-hub-config.json
+          if ./scripts/validate-config.sh 2>/dev/null; then
+            echo "❌ validate-config.sh should have failed with invalid JSON"
+            exit 1
+          else
+            echo "✅ validate-config.sh correctly rejected invalid JSON"
+          fi
+        finally:
+          mv config/policy-hub-config.json.backup config/policy-hub-config.json
+
+      - name: Test validate-config.sh with missing required field
+        run: |
+          jq 'del(.processing.maxParallelJobs)' config/policy-hub-config.json > config/test-config.json
+          mv config/policy-hub-config.json config/policy-hub-config.json.backup
+          mv config/test-config.json config/policy-hub-config.json
+          if ./scripts/validate-config.sh 2>/dev/null; then
+            echo "❌ validate-config.sh should have failed with missing field"
+            exit 1
+          else
+            echo "✅ validate-config.sh correctly rejected config with missing field"
+          fi
+        finally:
+          mv config/policy-hub-config.json.backup config/policy-hub-config.json

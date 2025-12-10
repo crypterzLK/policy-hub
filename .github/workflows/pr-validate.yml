@@ -1,0 +1,137 @@
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'policies/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate policy structure
+        id: validate
+        run: |
+          echo "🔍 Validating policy structure..."
+
+          # Check for policies folder
+          if [ ! -d "policies" ]; then
+            echo "❌ Error: policies/ directory not found"
+            exit 1
+          fi
+
+          validation_errors=0
+
+          # Find all policy versions
+          while IFS= read -r -d '' policy_dir; do
+            policy_name=$(basename "$policy_dir")
+
+            # Find version directories
+            while IFS= read -r -d '' version_dir; do
+              version=$(basename "$version_dir")
+
+              echo "📋 Checking $policy_name/$version"
+
+              # Check semantic versioning (vX.Y.Z)
+              if ! [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "❌ Invalid version format '$version' in $policy_dir"
+                ((validation_errors++))
+                continue
+              fi
+
+              # Check required files
+              required_files=("metadata.json" "policy-definition.yaml")
+              required_dirs=("src" "docs")
+
+              for file in "${required_files[@]}"; do
+                if [ ! -f "$version_dir/$file" ]; then
+                  echo "❌ Missing required file: $file in $version_dir"
+                  ((validation_errors++))
+                fi
+              done
+
+              for dir in "${required_dirs[@]}"; do
+                if [ ! -d "$version_dir/$dir" ]; then
+                  echo "❌ Missing required directory: $dir/ in $version_dir"
+                  ((validation_errors++))
+                fi
+              done
+
+              # Additional validation: Check if src contains Go files
+              if [ -d "$version_dir/src" ] && [ -z "$(find "$version_dir/src" -name '*.go' 2>/dev/null)" ]; then
+                echo "⚠️  Warning: No Go files found in $version_dir/src"
+              fi
+
+            done < <(find "$policy_dir" -mindepth 1 -maxdepth 1 -type d -print0)
+
+          done < <(find policies -mindepth 1 -maxdepth 1 -type d -print0)
+
+          if [ $validation_errors -gt 0 ]; then
+            echo "❌ Validation failed with $validation_errors errors"
+            exit 1
+          fi
+
+          echo "✅ Structure validation passed"
+
+      - name: Detect new policy versions in PR
+        id: detect
+        uses: ./.github/actions/detect-versions
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+
+      - name: Comment on PR with validation results
+        if: always()
+        run: |
+          # Determine overall status
+          if [ "${{ steps.validate.outcome }}" == "success" ]; then
+            status="✅ **Validation Passed**"
+          else
+            status="❌ **Validation Failed**"
+          fi
+
+          comment="## Policy Validation Results
+
+$status
+
+"
+
+          # Add new versions section if any detected
+          if [ -n "${{ steps.detect.outputs.new_versions }}" ]; then
+            comment+="### New Policy Versions Detected:
+"
+            for version_path in ${{ steps.detect.outputs.new_versions }}; do
+              policy=$(echo "$version_path" | cut -d'/' -f1)
+              version=$(echo "$version_path" | cut -d'/' -f2)
+              comment+=" - **$policy** $version
+"
+            done
+            comment+="
+These versions will be published in the next batch release."
+          else
+            comment+="### No New Policy Versions
+This PR does not add new policy versions."
+          fi
+
+          # Add helpful information
+          comment+="
+### Policy Structure Requirements
+- Version format: \`vX.Y.Z\` (semantic versioning)
+- Required files: \`metadata.json\`, \`policy-definition.yaml\`
+- Required directories: \`src/\` (Go code), \`docs/\` (documentation)
+
+### Next Steps
+1. Fix any validation errors
+2. Ensure PR is reviewed and approved
+3. Merge PR to main branch
+4. Create GitHub release to trigger batch publishing"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$comment" || echo "Failed to post comment"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

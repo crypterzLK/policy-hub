@@ -1,0 +1,32 @@
+{
+  "s3": {
+    "path": "policies/",
+    "storageClass": "STANDARD",
+    "acl": "private"
+  },
+  "policyHub": {
+    "timeout": 30,
+    "retryAttempts": 3,
+    "retryDelay": 5,
+    "rateLimit": {
+      "requestsPerMinute": 60,
+      "burstLimit": 10
+    }
+  },
+  "validation": {
+    "requiredFiles": ["metadata.json", "policy-definition.yaml"],
+    "requiredDirs": ["src", "docs"],
+    "versionRegex": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+    "maxPolicyNameLength": 50,
+    "allowedFileExtensions": [".go", ".yaml", ".yml", ".json", ".md"]
+  },
+  "processing": {
+    "maxParallelJobs": 3,
+    "batchSize": 10
+  },
+  "logging": {
+    "level": "INFO",
+    "includeTimestamps": true,
+    "structuredOutput": false
+  }
+}
