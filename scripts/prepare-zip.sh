@@ -29,6 +29,27 @@ fi
 SRC_DIR="policies/$POLICY/$VERSION/src"
 POLICY_DIR="policies/$POLICY/$VERSION"
 ZIP_FILE="$POLICY-$VERSION.zip"
+CONFIG_FILE="${CONFIG_FILE:-config/policy-hub-config.json}"
+
+# Load configuration if available
+if [[ -f "$CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+  echo "📋 Using configurable validation from: $CONFIG_FILE"
+  
+  # Read required files from config
+  mapfile -t REQUIRED_FILES < <(jq -r '.validation.requiredFiles[]?' "$CONFIG_FILE" 2>/dev/null || echo "metadata.json policy-definition.yaml")
+  
+  # Read required directories from config  
+  mapfile -t REQUIRED_DIRS < <(jq -r '.validation.requiredDirs[]?' "$CONFIG_FILE" 2>/dev/null || echo "src docs")
+  
+  # Read required docs files from config
+  mapfile -t REQUIRED_DOCS < <(jq -r '.validation.requiredDocsFiles[]?' "$CONFIG_FILE" 2>/dev/null || echo "overview.md configuration.md examples.md")
+else
+  echo "⚠️  Using default validation (config not found or jq not available)"
+  # Fallback to hardcoded defaults
+  REQUIRED_FILES=("metadata.json" "policy-definition.yaml")
+  REQUIRED_DIRS=("src" "docs")
+  REQUIRED_DOCS=("overview.md" "configuration.md" "examples.md")
+fi
 
 if [[ ! -d "$POLICY_DIR" ]]; then
   echo "Policy directory $POLICY_DIR not found" >&2
@@ -36,9 +57,6 @@ if [[ ! -d "$POLICY_DIR" ]]; then
 fi
 
 # Check for required files
-REQUIRED_FILES=("metadata.json" "policy-definition.yaml")
-REQUIRED_DIRS=("src" "docs")
-
 for file in "${REQUIRED_FILES[@]}"; do
   if [[ ! -f "$POLICY_DIR/$file" ]]; then
     echo "Required file $file not found in $POLICY_DIR" >&2
@@ -59,7 +77,6 @@ if ! find "$SRC_DIR" -name "*.go" -type f | grep -q .; then
 fi
 
 # Check for required docs files
-REQUIRED_DOCS=("overview.md" "configuration.md" "examples.md")
 for doc in "${REQUIRED_DOCS[@]}"; do
   if [[ ! -f "$POLICY_DIR/docs/$doc" ]]; then
     echo "Required documentation file docs/$doc not found in $POLICY_DIR" >&2

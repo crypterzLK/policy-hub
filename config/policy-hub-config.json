@@ -14,11 +14,40 @@
     }
   },
   "validation": {
-    "requiredFiles": ["metadata.json", "policy-definition.yaml"],
-    "requiredDirs": ["src", "docs"],
+    "requiredFiles": [
+      "metadata.json",
+      "policy-definition.yaml"
+    ],
+    "requiredDirs": [
+      "src",
+      "docs"
+    ],
+    "requiredDocsFiles": [
+      "overview.md",
+      "configuration.md",
+      "examples.md"
+    ],
+    "requiredMetadataFields": [
+      "name",
+      "displayName",
+      "provider",
+      "categories",
+      "description",
+      "version"
+    ],
+    "optionalDirs": [
+      "assets"
+    ],
     "versionRegex": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
     "maxPolicyNameLength": 50,
-    "allowedFileExtensions": [".go", ".yaml", ".yml", ".json", ".md"]
+    "allowedFileExtensions": [
+      ".go",
+      ".yaml",
+      ".yml",
+      ".json",
+      ".md"
+    ],
+    "strictValidation": true
   },
   "processing": {
     "maxParallelJobs": 3,
