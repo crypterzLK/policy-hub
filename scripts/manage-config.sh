@@ -5,7 +5,10 @@
 
 set -euo pipefail
 
-CONFIG_FILE="config/policy-hub-config.json"
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG_FILE="$REPO_ROOT/config/policy-hub-config.json"
 ACTION="${1:-list}"
 KEY="${2:-}"
 VALUE="${3:-}"

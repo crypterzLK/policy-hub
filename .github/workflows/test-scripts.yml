@@ -98,8 +98,11 @@ jobs:
 
       - name: Test prepare-zip.sh with valid input
         run: |
-          cd test
-          if ../scripts/prepare-zip.sh test-policy v1.0.0; then
+          # Copy test policy to expected location for script
+          mkdir -p policies/test-policy/v1.0.0
+          cp -r test/policies/test-policy/v1.0.0/* policies/test-policy/v1.0.0/
+          
+          if ./scripts/prepare-zip.sh test-policy v1.0.0; then
             echo "✅ prepare-zip.sh succeeded"
             if [ -f "test-policy-v1.0.0.zip" ]; then
               echo "✅ ZIP file created"
@@ -118,6 +121,9 @@ jobs:
                 echo "❌ ZIP missing expected docs files"
                 exit 1
               fi
+              # Cleanup
+              rm -rf policies/test-policy
+              rm -f test-policy-v1.0.0.zip
             else
               echo "❌ ZIP file not created"
               exit 1
@@ -129,8 +135,7 @@ jobs:
 
       - name: Test prepare-zip.sh with invalid policy name
         run: |
-          cd test
-          if ../scripts/prepare-zip.sh "test policy" v1.0.0 2>/dev/null; then
+          if ./scripts/prepare-zip.sh "test policy" v1.0.0 2>/dev/null; then
             echo "❌ prepare-zip.sh should have failed with invalid policy name"
             exit 1
           else
@@ -139,8 +144,7 @@ jobs:
 
       - name: Test prepare-zip.sh with invalid version
         run: |
-          cd test
-          if ../scripts/prepare-zip.sh test-policy "1.0.0" 2>/dev/null; then
+          if ./scripts/prepare-zip.sh test-policy "1.0.0" 2>/dev/null; then
             echo "❌ prepare-zip.sh should have failed with invalid version"
             exit 1
           else
@@ -149,8 +153,7 @@ jobs:
 
       - name: Test prepare-zip.sh with missing source directory
         run: |
-          cd test
-          if ../scripts/prepare-zip.sh nonexistent-policy v1.0.0 2>/dev/null; then
+          if ./scripts/prepare-zip.sh nonexistent-policy v1.0.0 2>/dev/null; then
             echo "❌ prepare-zip.sh should have failed with missing directory"
             exit 1
           else

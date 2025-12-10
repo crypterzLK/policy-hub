@@ -26,10 +26,14 @@ if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-SRC_DIR="policies/$POLICY/$VERSION/src"
-POLICY_DIR="policies/$POLICY/$VERSION"
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+SRC_DIR="$REPO_ROOT/policies/$POLICY/$VERSION/src"
+POLICY_DIR="$REPO_ROOT/policies/$POLICY/$VERSION"
 ZIP_FILE="$POLICY-$VERSION.zip"
-CONFIG_FILE="${CONFIG_FILE:-config/policy-hub-config.json}"
+CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/policy-hub-config.json}"
 
 # Load configuration if available
 if [[ -f "$CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then

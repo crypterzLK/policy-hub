@@ -5,7 +5,10 @@
 
 set -euo pipefail
 
-CONFIG_FILE="${CONFIG_FILE:-config/policy-hub-config.json}"
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/policy-hub-config.json}"
 POLICY_PATH="${1:-}"
 VERSION="${2:-}"
 
@@ -209,7 +212,7 @@ main() {
 
     local policy_name="$POLICY_PATH"
     local version="${VERSION:-v1.0.0}"
-    local policy_dir="policies/$policy_name/$version"
+    local policy_dir="$REPO_ROOT/policies/$policy_name/$version"
     local total_errors=0
 
     echo "🚀 Starting configurable policy validation..."
