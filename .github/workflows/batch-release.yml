@@ -67,8 +67,51 @@ jobs:
           version_count=$(echo "${{ steps.detect.outputs.new-versions }}" | wc -w)
           echo "count=$version_count" >> $GITHUB_OUTPUT
 
-  publish-policies:
+  validate-policies:
     needs: detect-versions
+    if: needs.detect-versions.outputs.version-count > 0
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate policies before release
+        run: |
+          echo "🔍 Validating all policies before release using configurable requirements..."
+          
+          # Make validation script executable
+          chmod +x scripts/validate-policy.sh
+          
+          validation_errors=0
+          versions="${{ needs.detect-versions.outputs.new-versions }}"
+          
+          for version_path in $versions; do
+            policy=$(echo $version_path | cut -d'/' -f1)
+            version=$(echo $version_path | cut -d'/' -f2)
+            
+            echo "📋 Pre-release validation for $policy/$version"
+            
+            if ./scripts/validate-policy.sh "$policy" "$version" 2>&1; then
+              echo "✅ Pre-release validation passed for $policy/$version"
+            else
+              echo "❌ Pre-release validation failed for $policy/$version"
+              ((validation_errors++))
+            fi
+          done
+          
+          if [ $validation_errors -gt 0 ]; then
+            echo ""
+            echo "💥 Pre-release validation failed with $validation_errors error(s)."
+            echo "📋 Release blocked - fix validation issues before publishing"
+            exit 1
+          else
+            echo ""
+            echo "🎉 All policies passed pre-release validation!"
+            echo "📋 Ready for publishing with configurable requirements verified"
+          fi
+
+  publish-policies:
+    needs: [detect-versions, validate-policies]
     if: needs.detect-versions.outputs.version-count > 0
     runs-on: ubuntu-latest
     environment: production

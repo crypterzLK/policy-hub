@@ -35,14 +35,14 @@ CONFIG_FILE="${CONFIG_FILE:-config/policy-hub-config.json}"
 if [[ -f "$CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then
   echo "📋 Using configurable validation from: $CONFIG_FILE"
   
-  # Read required files from config
-  mapfile -t REQUIRED_FILES < <(jq -r '.validation.requiredFiles[]?' "$CONFIG_FILE" 2>/dev/null || echo "metadata.json policy-definition.yaml")
+  # Read required files from config (compatible with older bash versions)
+  IFS=$'\n' read -r -d '' -a REQUIRED_FILES < <(jq -r '.validation.requiredFiles[]?' "$CONFIG_FILE" 2>/dev/null && printf '\0') || REQUIRED_FILES=("metadata.json" "policy-definition.yaml")
   
   # Read required directories from config  
-  mapfile -t REQUIRED_DIRS < <(jq -r '.validation.requiredDirs[]?' "$CONFIG_FILE" 2>/dev/null || echo "src docs")
+  IFS=$'\n' read -r -d '' -a REQUIRED_DIRS < <(jq -r '.validation.requiredDirs[]?' "$CONFIG_FILE" 2>/dev/null && printf '\0') || REQUIRED_DIRS=("src" "docs")
   
   # Read required docs files from config
-  mapfile -t REQUIRED_DOCS < <(jq -r '.validation.requiredDocsFiles[]?' "$CONFIG_FILE" 2>/dev/null || echo "overview.md configuration.md examples.md")
+  IFS=$'\n' read -r -d '' -a REQUIRED_DOCS < <(jq -r '.validation.requiredDocsFiles[]?' "$CONFIG_FILE" 2>/dev/null && printf '\0') || REQUIRED_DOCS=("overview.md" "configuration.md" "examples.md")
 else
   echo "⚠️  Using default validation (config not found or jq not available)"
   # Fallback to hardcoded defaults
