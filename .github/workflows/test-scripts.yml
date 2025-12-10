@@ -22,62 +22,79 @@ jobs:
         run: |
           mkdir -p test/policies/test-policy/v1.0.0/src
           mkdir -p test/policies/test-policy/v1.0.0/docs
-          echo 'package main
+          
+          # Create Go source file
+          cat > test/policies/test-policy/v1.0.0/src/main.go << 'EOF'
+          package main
 
-import "fmt"
+          import "fmt"
 
-func main() {
-    fmt.Println("Hello, Policy!")
-}' > test/policies/test-policy/v1.0.0/src/main.go
+          func main() {
+              fmt.Println("Hello, Policy!")
+          }
+          EOF
+          
+          # Create metadata.json
+          cat > test/policies/test-policy/v1.0.0/metadata.json << 'EOF'
+          {
+            "name": "test-policy",
+            "displayName": "Test Policy",
+            "provider": "test-provider",
+            "categories": ["security", "compliance"],
+            "description": "Test policy for validation",
+            "version": "v1.0.0"
+          }
+          EOF
+          
+          # Create policy-definition.yaml
+          cat > test/policies/test-policy/v1.0.0/policy-definition.yaml << 'EOF'
+          apiVersion: policy/v1
+          kind: Policy
+          metadata:
+            name: test-policy
+          spec:
+            rules:
+              - name: test-rule
+                condition: "true"
+                action: allow
+          EOF
+          
+          # Create documentation files
+          cat > test/policies/test-policy/v1.0.0/docs/overview.md << 'EOF'
+          # Test Policy Overview
 
-          echo '{
-  "name": "test-policy",
-  "displayName": "Test Policy",
-  "provider": "test-provider",
-  "categories": ["security", "compliance"],
-  "description": "Test policy for validation",
-  "version": "v1.0.0"
-}' > test/policies/test-policy/v1.0.0/metadata.json
+          This is a test policy for validation purposes.
 
-          echo 'apiVersion: policy/v1
-kind: Policy
-metadata:
-  name: test-policy
-spec:
-  rules:
-    - name: test-rule
-      condition: "true"
-      action: allow' > test/policies/test-policy/v1.0.0/policy-definition.yaml
+          ## Purpose
 
-          echo '# Test Policy Overview
+          Demonstrates policy structure validation.
+          EOF
+          
+          cat > test/policies/test-policy/v1.0.0/docs/configuration.md << 'EOF'
+          # Configuration
 
-This is a test policy for validation purposes.
+          ## Parameters
 
-## Purpose
+          - `enabled`: Enable or disable the policy (default: true)
+          EOF
+          
+          cat > test/policies/test-policy/v1.0.0/docs/examples.md << 'EOF'
+          # Examples
 
-Demonstrates policy structure validation.' > test/policies/test-policy/v1.0.0/docs/overview.md
+          ## Basic Usage
 
-          echo '# Configuration
-
-## Parameters
-
-- `enabled`: Enable or disable the policy (default: true)' > test/policies/test-policy/v1.0.0/docs/configuration.md
-
-          echo '# Examples
-
-## Basic Usage
-
-```yaml
-apiVersion: policy/v1
-kind: Policy
-metadata:
-  name: test-policy
-spec:
-  rules:
-    - name: test-rule
-      condition: "true"
-      action: allow
-```' > test/policies/test-policy/v1.0.0/docs/examples.md
+          ```yaml
+          apiVersion: policy/v1
+          kind: Policy
+          metadata:
+            name: test-policy
+          spec:
+            rules:
+              - name: test-rule
+                condition: "true"
+                action: allow
+          ```
+          EOF
 
       - name: Test prepare-zip.sh with valid input
         run: |
