@@ -32,7 +32,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SRC_DIR="$REPO_ROOT/policies/$POLICY/$VERSION/src"
 POLICY_DIR="$REPO_ROOT/policies/$POLICY/$VERSION"
-ZIP_FILE="$POLICY-$VERSION.zip"
+ZIP_FILE="$REPO_ROOT/$POLICY-$VERSION.zip"
 CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/policy-hub-config.json}"
 
 # Load configuration if available
@@ -90,21 +90,21 @@ done
 
 # Create ZIP with better error handling
 cd "$POLICY_DIR"
-if ! zip -r "../../$ZIP_FILE" . >/dev/null 2>&1; then
+if ! zip -r "$ZIP_FILE" . >/dev/null 2>&1; then
   echo "Failed to create ZIP file" >&2
   exit 1
 fi
 
 # Verify ZIP was created and is not empty
-if [[ ! -f "../../$ZIP_FILE" ]]; then
+if [[ ! -f "$ZIP_FILE" ]]; then
   echo "ZIP file was not created" >&2
   exit 1
 fi
 
-if [[ ! -s "../../$ZIP_FILE" ]]; then
+if [[ ! -s "$ZIP_FILE" ]]; then
   echo "ZIP file is empty" >&2
-  rm -f "../../$ZIP_FILE"
+  rm -f "$ZIP_FILE"
   exit 1
 fi
 
-echo "Created $ZIP_FILE successfully"
+echo "Created $(basename "$ZIP_FILE") successfully"
