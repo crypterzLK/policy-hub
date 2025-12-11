@@ -23,30 +23,34 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.release.target_commitish }}
 
-      - name: Get last release tag
-        id: last_release
-        run: |
-          echo "Fetching last release tag..."
-          last_tag=$(git tag --list --sort=-version:refname | head -1 || echo "")
-          echo "last_tag=$last_tag" >> $GITHUB_OUTPUT
-        shell: bash
-
       - name: Get base SHA
         id: get_base
         run: |
           current_tag="${{ github.event.release.tag_name }}"
-          last_tag="${{ steps.last_release.outputs.last_tag }}"
           
-          # If last_tag is empty or same as current tag, this is the first release
-          if [ -z "$last_tag" ] || [ "$last_tag" = "$current_tag" ]; then
-            # Use initial commit for first release
+          echo "Current release tag: $current_tag"
+          
+          # Get all tags except the current one, sorted by version
+          all_tags=$(git tag --list --sort=-version:refname)
+          echo "All tags: $all_tags"
+          
+          # Filter out current tag to get previous tags
+          previous_tags=$(echo "$all_tags" | grep -v "^${current_tag}$" | head -5)
+          echo "Previous tags (excluding current): $previous_tags"
+          
+          # Get the most recent previous tag
+          last_tag=$(echo "$previous_tags" | head -1)
+          
+          if [ -z "$last_tag" ]; then
+            # No previous tags found - this is the first release
             base_sha=$(git rev-list --max-parents=0 HEAD)
-            echo "First release detected, using initial commit: $base_sha"
+            echo "✅ First release detected, using initial commit: $base_sha"
           else
             # Use previous tag for subsequent releases
             base_sha="$last_tag"
-            echo "Using previous release: $base_sha"
+            echo "✅ Using previous release tag: $base_sha"
           fi
+          
           echo "base_sha=$base_sha" >> $GITHUB_OUTPUT
         shell: bash
 
