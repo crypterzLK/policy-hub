@@ -1,0 +1,25 @@
+parametersSchema:
+  type: object
+  properties:
+    requestsPerMinute:
+      type: integer
+      minimum: 1
+      description: "Maximum requests allowed per minute"
+    burstLimit:
+      type: integer
+      minimum: 1
+      description: "Burst limit for requests"
+  required:
+    - requestsPerMinute
+    - burstLimit
+
+processingMode:
+  requestHeaderMode: PROCESS
+  requestBodyMode: SKIP
+  responseHeaderMode: SKIP
+  responseBodyMode: SKIP
+
+supportedFlows:
+  - request
+
+executionMode: buffered
