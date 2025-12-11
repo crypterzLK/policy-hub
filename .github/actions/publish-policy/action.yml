@@ -81,16 +81,27 @@ runs:
         )
 
         sync_url="${{ inputs.policy-hub-url }}/sync"
-        if curl -X POST "$sync_url" \
+        echo "🔗 Syncing with Policy Hub: $sync_url"
+        echo "📝 Payload: $payload"
+        
+        response=$(curl -X POST "$sync_url" \
           -H "Authorization: Bearer $POLICY_HUB_API_KEY" \
           -H "Content-Type: application/json" \
           -H "ngrok-skip-browser-warning: true" \
           -d "$payload" \
-          --fail --silent --show-error --max-time 30; then
-          echo "✅ Synced with Policy Hub"
+          --max-time 30 \
+          -w "HTTP_CODE:%{http_code}" \
+          -s)
+        
+        http_code=$(echo "$response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
+        response_body=$(echo "$response" | sed 's/HTTP_CODE:[0-9]*$//')
+        
+        if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+          echo "✅ Synced with Policy Hub (HTTP $http_code)"
           echo "success=true" >> $GITHUB_OUTPUT
         else
-          echo "❌ Policy Hub sync failed"
+          echo "❌ Policy Hub sync failed (HTTP $http_code)"
+          echo "Response: $response_body"
           echo "success=false" >> $GITHUB_OUTPUT
         fi
       shell: bash
