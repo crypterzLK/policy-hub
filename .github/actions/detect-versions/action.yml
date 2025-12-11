@@ -20,7 +20,7 @@ runs:
     - name: Verify Policy Hub API URL
       run: |
         echo "🔗 Verifying Policy Hub API URL: $POLICY_HUB_API_URL"
-        if ! curl -f --max-time 10 "$POLICY_HUB_API_URL" >/dev/null 2>&1; then
+        if ! curl -f --max-time 10 -H "ngrok-skip-browser-warning: true" "$POLICY_HUB_API_URL" >/dev/null 2>&1; then
           echo "❌ Policy Hub API URL is not reachable or returned an error."
           exit 1
         fi

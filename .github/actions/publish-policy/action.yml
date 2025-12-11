@@ -81,6 +81,7 @@ EOF
         if curl -X POST "$sync_url" \
           -H "Authorization: Bearer $POLICY_HUB_API_KEY" \
           -H "Content-Type: application/json" \
+          -H "ngrok-skip-browser-warning: true" \
           -d "$payload" \
           --fail --silent --show-error --max-time 30; then
           echo "✅ Synced with Policy Hub"
