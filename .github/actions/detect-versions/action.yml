@@ -64,7 +64,7 @@ runs:
           fi
         done
 
-        new_versions=$(echo $new_versions | tr ' ' '\n' | sort | uniq)
+        new_versions=$(echo $new_versions | tr ' ' '\n' | sort | uniq | tr '\n' ' ' | sed 's/[[:space:]]*$//')
         echo "new_versions=$new_versions" >> $GITHUB_OUTPUT
 
         if [ -n "$new_versions" ]; then
