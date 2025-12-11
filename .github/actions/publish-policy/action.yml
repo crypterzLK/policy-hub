@@ -116,10 +116,16 @@ runs:
         if [[ "$source_type" == "s3" ]]; then
           source_url="https://${{ inputs.s3-bucket }}.s3.${{ env.AWS_REGION || 'us-east-1' }}.amazonaws.com/policies/${{ inputs.policy }}-${{ inputs.version }}.zip"
         else
-          # GitHub release asset URL
-          source_url="${{ inputs.repo-url }}/releases/download/${{ inputs.version }}/${{ inputs.policy }}-${{ inputs.version }}.zip"
+          # GitHub raw repository URL for direct file access
+          source_url="${{ inputs.repo-url }}/raw/main/policies/${{ inputs.policy }}/${{ inputs.version }}"
           source_type="github"
         fi
+
+        # Always use GitHub raw URLs for policy resources (definition, docs, assets)
+        base_url="${{ inputs.repo-url }}/raw/main/$policy_dir"
+        definition_url="$base_url/policy-definition.yaml"
+        docs_base_url="$base_url/docs/"
+        assets_base_url="$base_url/assets/"
 
         # Construct API payload
         payload=$(cat <<EOF
@@ -128,10 +134,10 @@ runs:
           "version": "${{ inputs.version }}",
           "sourceType": "$source_type",
           "sourceUrl": "$source_url",
-          "definitionUrl": "${{ inputs.repo-url }}/raw/main/$policy_dir/policy-definition.yaml",
+          "definitionUrl": "$definition_url",
           "metadata": $metadata,
-          "docsBaseUrl": "${{ inputs.repo-url }}/raw/main/$policy_dir/docs/",
-          "assetsBaseUrl": "${{ inputs.repo-url }}/raw/main/$policy_dir/assets/"
+          "docsBaseUrl": "$docs_base_url",
+          "assetsBaseUrl": "$assets_base_url"
         }
         EOF
         )
