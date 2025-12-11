@@ -157,6 +157,7 @@ jobs:
           s3-bucket: ${{ vars.S3_BUCKET_NAME }}
           policy-hub-url: ${{ vars.POLICY_HUB_API_URL }}
           repo-url: ${{ github.server_url }}/${{ github.repository }}
+          policy-hub-api-key: ${{ secrets.POLICY_HUB_API_KEY }}
 
       - name: Report result
         if: always()
