@@ -17,6 +17,9 @@ inputs:
   repo-url:
     description: 'GitHub repository URL'
     required: true
+  policy-hub-api-key:
+    description: 'Policy Hub API key'
+    required: true
 
 runs:
   using: 'composite'
@@ -92,7 +95,7 @@ runs:
         fi
       shell: bash
       env:
-        POLICY_HUB_API_KEY: ${{ secrets.POLICY_HUB_API_KEY }}
+        POLICY_HUB_API_KEY: ${{ inputs.policy-hub-api-key }}
 
     - name: Cleanup
       if: always()
