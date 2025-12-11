@@ -27,16 +27,27 @@ jobs:
         id: last_release
         run: |
           echo "Fetching last release tag..."
-          last_tag=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
+          last_tag=$(git tag --list --sort=-version:refname | head -1 || echo "")
           echo "last_tag=$last_tag" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Get base SHA
+        id: get_base
+        run: |
+          if [ -n "${{ steps.last_release.outputs.last_tag }}" ]; then
+            base_sha="${{ steps.last_release.outputs.last_tag }}"
+          else
+            # Use initial commit if no tags exist
+            base_sha=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "base_sha=$base_sha" >> $GITHUB_OUTPUT
+        shell: bash
 
       - name: Detect new policy versions
         id: detect
         uses: ./.github/actions/detect-versions
         with:
-          base-sha: ${{ steps.last_release.outputs.last_tag || github.event.release.target_commitish }}
+          base-sha: ${{ steps.get_base.outputs.base_sha }}
           head-sha: ${{ github.sha }}
 
       - name: Format versions for matrix
