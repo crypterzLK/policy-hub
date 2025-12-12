@@ -1,0 +1,43 @@
+name: PR Validation Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  test-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Simple validation test
+        run: |
+          echo "🧪 PR Validation Test Workflow triggered!"
+          echo "📋 PR Number: ${{ github.event.pull_request.number }}"
+          echo "📋 PR Title: ${{ github.event.pull_request.title }}"
+          echo "📋 Changed files: ${{ github.event.pull_request.changed_files }}"
+
+          # Basic checks
+          if [ -d "scripts" ]; then
+            echo "✅ Scripts directory exists"
+          else
+            echo "❌ Scripts directory missing"
+            exit 1
+          fi
+
+          if [ -d "config" ]; then
+            echo "✅ Config directory exists"
+          else
+            echo "❌ Config directory missing"
+            exit 1
+          fi
+
+          if [ -f "config/policy-hub-config.json" ]; then
+            echo "✅ Config file exists"
+          else
+            echo "❌ Config file missing"
+            exit 1
+          fi
+
+          echo "🎉 Basic validation passed!"
