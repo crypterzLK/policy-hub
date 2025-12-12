@@ -48,7 +48,8 @@
       ".json",
       ".md"
     ],
-    "strictValidation": true
+    "strictValidation": true,
+    "validateGoBuild": true
   },
   "processing": {
     "maxParallelJobs": 3,

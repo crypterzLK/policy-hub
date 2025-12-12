@@ -102,6 +102,52 @@ validate_policy_structure() {
     return $errors
 }
 
+validate_go_build() {
+    local policy_dir="$1"
+    local errors=0
+    
+    echo "🔍 Validating Go code compilation: $policy_dir"
+    
+    # Check if src directory exists and contains Go files
+    if [ ! -d "$policy_dir/src" ]; then
+        log_warning "No src directory found, skipping Go build validation"
+        return 0
+    fi
+    
+    # Check for Go files
+    local go_files=$(find "$policy_dir/src" -name "*.go" -type f)
+    if [ -z "$go_files" ]; then
+        log_warning "No Go files found in src directory, skipping Go build validation"
+        return 0
+    fi
+    
+    # Create a temporary directory for build
+    local temp_dir=$(mktemp -d)
+    trap "rm -rf $temp_dir" EXIT
+    
+    # Copy Go files to temp directory
+    cp -r "$policy_dir/src"/* "$temp_dir/"
+    
+    # Try to build the Go code
+    cd "$temp_dir"
+    if go mod init temp-policy 2>/dev/null; then
+        # Try to build
+        if go build -v . 2>&1; then
+            log_success "Go code compiles successfully"
+        else
+            log_error "Go code compilation failed"
+            go build -v . 2>&1 | while read -r line; do
+                log_error "  $line"
+            done
+            ((errors++))
+        fi
+    else
+        log_warning "Could not initialize Go module, skipping build validation"
+    fi
+    
+    return $errors
+}
+
 validate_metadata() {
     local metadata_file="$1"
     local errors=0
@@ -243,6 +289,15 @@ main() {
     validate_metadata "$policy_dir/metadata.json"
     metadata_errors=$?
     total_errors=$((total_errors + metadata_errors))
+
+    # Validate Go code compilation (if enabled in config)
+    if [ "$(get_config_value "validateGoBuild")" = "true" ]; then
+        validate_go_build "$policy_dir"
+        build_errors=$?
+        total_errors=$((total_errors + build_errors))
+    else
+        log_warning "Go build validation is disabled in config"
+    fi
 
     echo ""
     if [ $total_errors -eq 0 ]; then
