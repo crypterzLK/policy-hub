@@ -1,0 +1,233 @@
+name: PR Policy Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'policies/**'
+
+jobs:
+  validate-policies:
+    name: Validate Policy Structure
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Setup jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Validate policy structure
+        id: policy-validation
+        run: |
+          echo "🔍 Starting policy structure validation..."
+          echo "📋 Repository: ${{ github.repository }}"
+          echo "📋 PR: #${{ github.event.pull_request.number }}"
+          echo "📋 Branch: ${{ github.head_ref }}"
+
+          # Initialize validation results
+          validation_errors=0
+          validated_policies=0
+
+          # Check if policies directory exists
+          if [ ! -d "policies" ]; then
+            echo "ℹ️  No policies directory found - this PR doesn't add policies"
+            echo "validation_status=no-policies" >> $GITHUB_OUTPUT
+            echo "validated_count=0" >> $GITHUB_OUTPUT
+            echo "error_count=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Make validation script executable
+          if [ -f "scripts/validate-policy.sh" ]; then
+            chmod +x scripts/validate-policy.sh
+            echo "✅ Validation script is executable"
+          else
+            echo "❌ Validation script not found: scripts/validate-policy.sh"
+            echo "validation_status=script-missing" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Validate configuration file exists
+          if [ ! -f "config/policy-hub-config.json" ]; then
+            echo "❌ Configuration file not found: config/policy-hub-config.json"
+            echo "validation_status=config-missing" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "📋 Validating policies using configurable requirements..."
+
+          # Find and validate all policy versions
+          while IFS= read -r -d '' policy_dir; do
+            policy_name=$(basename "$policy_dir")
+            echo "🔍 Processing policy: $policy_name"
+
+            # Find version directories for this policy
+            while IFS= read -r -d '' version_dir; do
+              version=$(basename "$version_dir")
+              echo "📋 Validating $policy_name/$version"
+
+              ((validated_policies++))
+
+              # Run validation script
+              if ./scripts/validate-policy.sh "$policy_name" "$version" 2>&1; then
+                echo "✅ Policy validation passed: $policy_name/$version"
+              else
+                echo "❌ Policy validation failed: $policy_name/$version"
+                ((validation_errors++))
+              fi
+
+            done < <(find "$policy_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+          done < <(find policies -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+          # Set output variables
+          echo "validation_status=completed" >> $GITHUB_OUTPUT
+          echo "validated_count=$validated_policies" >> $GITHUB_OUTPUT
+          echo "error_count=$validation_errors" >> $GITHUB_OUTPUT
+
+          # Summary
+          echo ""
+          echo "📊 Validation Summary:"
+          echo "   Policies validated: $validated_policies"
+          echo "   Validation errors: $validation_errors"
+
+          if [ $validation_errors -gt 0 ]; then
+            echo "💥 Validation failed with $validation_errors error(s)"
+            exit 1
+          else
+            echo "🎉 All policy validations passed!"
+          fi
+
+      - name: Detect new policy versions
+        id: detect-versions
+        uses: ./.github/actions/detect-versions
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+
+      - name: Generate validation report
+        id: report
+        run: |
+          # Generate detailed validation report
+          validation_status="${{ steps.policy-validation.outputs.validation_status }}"
+          validated_count="${{ steps.policy-validation.outputs.validated_count }}"
+          error_count="${{ steps.policy-validation.outputs.error_count }}"
+          new_versions="${{ steps.detect-versions.outputs.new_versions }}"
+
+          # Create JSON report for structured output
+          cat > validation-report.json << EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "repository": "${{ github.repository }}",
+            "pull_request": ${{ github.event.pull_request.number }},
+            "validation_status": "$validation_status",
+            "policies_validated": $validated_count,
+            "validation_errors": $error_count,
+            "new_versions": "$new_versions"
+          }
+          EOF
+
+          echo "report_file=validation-report.json" >> $GITHUB_OUTPUT
+
+      - name: Comment on PR with validation results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Read validation report
+            let report = {};
+            try {
+              report = JSON.parse(fs.readFileSync('validation-report.json', 'utf8'));
+            } catch (error) {
+              console.log('Could not read validation report:', error.message);
+              report = { validation_status: 'unknown', policies_validated: 0, validation_errors: 0 };
+            }
+
+            // Determine status
+            const isSuccess = report.validation_status === 'completed' && report.validation_errors === 0;
+            const statusEmoji = isSuccess ? '✅' : '❌';
+            const statusText = isSuccess ? 'Validation Passed' : 'Validation Failed';
+
+            // Build comment
+            let comment = '## ' + statusEmoji + ' Policy Validation Results\n\n';
+            comment += '**' + statusText + '**\n\n';
+            comment += '### 📊 Validation Summary\n';
+            comment += '- **Status**: ' + report.validation_status + '\n';
+            comment += '- **Policies Validated**: ' + report.policies_validated + '\n';
+            comment += '- **Validation Errors**: ' + report.validation_errors + '\n';
+
+            // Add new versions section
+            if (report.new_versions && report.new_versions.trim()) {
+              const versions = report.new_versions.trim().split(/\s+/);
+              comment += '\n### 🆕 New Policy Versions Detected\n';
+              comment += versions.map(v => '- **' + v.replace('/', ' ') + '**').join('\n') + '\n\n';
+              comment += '*These versions will be published in the next batch release.*';
+            } else {
+              comment += '\n### ℹ️ No New Policy Versions\n';
+              comment += '*This PR does not add new policy versions.*';
+            }
+
+            // Add configuration details
+            comment += '\n\n### ⚙️ Validation Configuration\n';
+
+            try {
+              const config = JSON.parse(fs.readFileSync('config/policy-hub-config.json', 'utf8'));
+              const validation = config.validation || {};
+
+              comment += '- **Required Files**: ' + (validation.requiredFiles ? validation.requiredFiles.join(', ') : 'N/A') + '\n';
+              comment += '- **Required Directories**: ' + (validation.requiredDirs ? validation.requiredDirs.join(', ') : 'N/A') + '\n';
+              comment += '- **Required Docs**: ' + (validation.requiredDocsFiles ? validation.requiredDocsFiles.join(', ') : 'N/A') + '\n';
+              comment += '- **Required Metadata**: ' + (validation.requiredMetadataFields ? validation.requiredMetadataFields.join(', ') : 'N/A') + '\n';
+              comment += '- **Strict Validation**: ' + (validation.strictValidation || false) + '\n';
+              comment += '- **Go Build Validation**: ' + (config.processing?.enableGoBuildValidation || false);
+            } catch (error) {
+              comment += '*Configuration file not accessible*';
+            }
+
+            // Add helpful information
+            comment += '\n\n### 🛠️ Validation Tools\n';
+            comment += '- **Validate locally**: `./scripts/validate-policy.sh <policy-name> <version>`\n';
+            comment += '- **View configuration**: `./scripts/manage-config.sh list`\n';
+            comment += '- **Modify requirements**: Edit `config/policy-hub-config.json`\n\n';
+
+            comment += '### 📋 Next Steps\n';
+            comment += '1. Review validation results above\n';
+            comment += '2. Fix any validation errors if present\n';
+            comment += '3. Ensure all required files and documentation are included\n';
+            comment += '4. Verify Go code compiles (if enabled)\n';
+            comment += '5. Request review and merge when ready\n';
+            comment += '6. Create GitHub release to trigger batch publishing\n\n';
+
+            comment += '---\n';
+            comment += '*Validation performed on: ' + report.timestamp + '*';
+
+            // Post comment
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-validation-report
+          path: validation-report.json
+          retention-days: 30
