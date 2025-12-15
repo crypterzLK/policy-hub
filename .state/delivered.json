@@ -1,1 +1,8 @@
-{}
+{
+  "_metadata": {
+    "version": "1.0.0",
+    "description": "Tracks successful policy deliveries per folder",
+    "lastUpdated": "2025-12-15T00:00:00Z"
+  },
+  "deliveries": {}
+}

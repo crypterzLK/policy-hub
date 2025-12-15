@@ -1,17 +1,32 @@
 # Policy Hub Repository
 
-Batch publishing of policy versions via GitHub releases with robust error handling, parallel processing, and comprehensive validation.
+**Reliable folder-based delivery system** for Policy Hub with exactly-once delivery semantics, automatic retry mechanisms, and comprehensive state tracking.
 
 ## Features
 
-- 🚀 **Parallel Processing**: Publish multiple policy versions concurrently (up to 3 parallel jobs)
-- 🛡️ **Robust Error Handling**: Individual version failures don't stop batch processing
-- 🔍 **Smart Version Detection**: Git-based detection of new policy versions
+- 🎯 **Exactly-Once Delivery**: Commit SHA-based tracking prevents duplicates
+- 🔄 **Automatic Retry**: Failed deliveries retry on next release
+- 📁 **Folder-Level Granularity**: Per-folder success/failure handling
+- 🚀 **Parallel Processing**: Concurrent delivery with controlled concurrency
+- 🛡️ **Robust Error Handling**: Individual failures don't block other deliveries
+- 🔍 **Smart Change Detection**: Git-based detection of modified policy folders
 - 📦 **Automated Packaging**: ZIP creation with validation and integrity checks
 - ☁️ **Cloud Storage**: S3 integration for artifact storage
-- 🔗 **API Integration**: Seamless sync with Policy Hub API
+- 🔗 **API Integration**: Idempotent sync with Policy Hub API
 - ✅ **Comprehensive Testing**: Automated testing for scripts and workflows
 - 📋 **PR Validation**: Automated validation of policy structure in pull requests
+- 📊 **Audit Trail**: Complete delivery history in Git repository
+
+## Delivery System
+
+The repository uses a **reliable delivery system** that ensures policies are delivered exactly once:
+
+- **State Tracking**: `.state/delivered.json` tracks successful deliveries per folder
+- **Baseline Management**: `.state/baseline.sha` tracks the last processed commit
+- **Idempotent Operations**: Commit SHA-based deduplication
+- **Automatic Recovery**: Failed folders retry on subsequent releases
+
+See [`docs/RELIABLE_DELIVERY.md`](docs/RELIABLE_DELIVERY.md) for detailed documentation.
 
 ## Required Secrets and Variables
 

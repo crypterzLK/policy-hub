@@ -1,0 +1,99 @@
+name: 'Check Delivery Status'
+description: 'Determines which folders need delivery based on current state'
+inputs:
+  changed-folders:
+    description: 'JSON array of changed folder paths'
+    required: true
+  baseline-sha:
+    description: 'The baseline commit SHA'
+    required: true
+outputs:
+  pending-folders:
+    description: 'JSON array of folders that need delivery'
+    value: ${{ steps.check.outputs.pending-folders }}
+  skipped-folders:
+    description: 'JSON array of folders that were skipped'
+    value: ${{ steps.check.outputs.skipped-folders }}
+  pending-count:
+    description: 'Number of folders pending delivery'
+    value: ${{ steps.check.outputs.pending-count }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Check delivery eligibility
+      id: check
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        changed_folders_json="${{ inputs.changed-folders }}"
+        baseline_sha="${{ inputs.baseline-sha }}"
+
+        echo "🔍 Checking delivery status for changed folders"
+
+        # Parse JSON array to get folders
+        if ! changed_folders=$(echo "$changed_folders_json" | jq -r '.[]' 2>/dev/null); then
+          echo "❌ Failed to parse changed folders JSON"
+          echo "pending-folders=[]" >> $GITHUB_OUTPUT
+          echo "skipped-folders=[]" >> $GITHUB_OUTPUT
+          echo "pending-count=0" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        pending_folders=""
+        skipped_folders=""
+        pending_count=0
+
+        # Check each folder
+        while IFS= read -r folder; do
+          if [ -z "$folder" ]; then continue; fi
+
+          echo "📋 Checking $folder"
+
+          # Get latest commit affecting this folder
+          if ! latest_commit=$(git log -1 --format=%H -- "$folder" 2>/dev/null); then
+            echo "⚠️  Could not get commit for $folder, will deliver"
+            pending_folders="$pending_folders$folder\n"
+            pending_count=$((pending_count + 1))
+            continue
+          fi
+
+          # Check if already delivered
+          if [ -f ".state/delivered.json" ]; then
+            delivered_commit=$(jq -r ".deliveries.\"$folder\" // empty" ".state/delivered.json" 2>/dev/null || echo "")
+            if [ -n "$delivered_commit" ] && [ "$latest_commit" = "$delivered_commit" ]; then
+              echo "⏭️  $folder already delivered (commit: $delivered_commit)"
+              skipped_folders="$skipped_folders$folder\n"
+              continue
+            fi
+          fi
+
+          echo "📦 $folder needs delivery (commit: $latest_commit)"
+          pending_folders="$pending_folders$folder\n"
+          pending_count=$((pending_count + 1))
+
+        done <<< "$changed_folders"
+
+        # Convert to JSON arrays
+        pending_json="["
+        first=true
+        while IFS= read -r folder; do
+          if [ -z "$folder" ]; then continue; fi
+          if [ "$first" = true ]; then first=false; else pending_json+=","; fi
+          pending_json+="\"$folder\""
+        done <<< "$pending_folders"
+        pending_json+="]"
+
+        skipped_json="["
+        first=true
+        while IFS= read -r folder; do
+          if [ -z "$folder" ]; then continue; fi
+          if [ "$first" = true ]; then first=false; else skipped_json+=","; fi
+          skipped_json+="\"$folder\""
+        done <<< "$skipped_folders"
+        skipped_json+="]"
+
+        echo "📊 Delivery check complete: $pending_count pending, $(echo "$skipped_folders" | wc -l | tr -d ' ') skipped"
+        echo "pending-folders=$pending_json" >> $GITHUB_OUTPUT
+        echo "skipped-folders=$skipped_json" >> $GITHUB_OUTPUT
+        echo "pending-count=$pending_count" >> $GITHUB_OUTPUT

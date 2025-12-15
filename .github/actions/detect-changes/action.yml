@@ -1,0 +1,78 @@
+name: 'Detect Policy Changes'
+description: 'Detects policy folders that have changed since the last baseline'
+inputs:
+  baseline-sha:
+    description: 'The baseline commit SHA to compare against'
+    required: true
+  head-sha:
+    description: 'The head commit SHA to compare to'
+    required: true
+outputs:
+  changed-folders:
+    description: 'JSON array of changed policy folder paths'
+    value: ${{ steps.detect.outputs.changed-folders }}
+  folder-count:
+    description: 'Number of changed folders'
+    value: ${{ steps.detect.outputs.folder-count }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect changed policy folders
+      id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        baseline_sha="${{ inputs.baseline-sha }}"
+        head_sha="${{ inputs.head-sha }}"
+
+        echo "🔍 Detecting changes between $baseline_sha and $head_sha"
+
+        # Get all changed files in policies directory
+        changed_files=$(git diff --name-only "$baseline_sha" "$head_sha" -- policies/ || echo "")
+
+        if [ -z "$changed_files" ]; then
+          echo "📋 No changes detected in policies directory"
+          echo "changed-folders=[]" >> $GITHUB_OUTPUT
+          echo "folder-count=0" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "📄 Changed files:"
+        echo "$changed_files" | sed 's/^/  /'
+
+        # Extract unique folder paths (policies/policy-name/version)
+        changed_folders=$(echo "$changed_files" | \
+          grep '^policies/' | \
+          awk -F'/' '{print $1"/"$2"/"$3}' | \
+          sort -u || echo "")
+
+        if [ -z "$changed_folders" ]; then
+          echo "📋 No valid policy folders found in changes"
+          echo "changed-folders=[]" >> $GITHUB_OUTPUT
+          echo "folder-count=0" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "📁 Changed policy folders:"
+        echo "$changed_folders" | sed 's/^/  /'
+
+        # Convert to JSON array
+        json_array="["
+        first=true
+        while IFS= read -r folder; do
+          if [ -z "$folder" ]; then continue; fi
+          if [ "$first" = true ]; then
+            first=false
+          else
+            json_array+=","
+          fi
+          json_array+="\"$folder\""
+        done <<< "$changed_folders"
+        json_array+="]"
+
+        folder_count=$(echo "$changed_folders" | wc -l | tr -d ' ')
+
+        echo "📊 Detected $folder_count changed folders"
+        echo "changed-folders=$json_array" >> $GITHUB_OUTPUT
+        echo "folder-count=$folder_count" >> $GITHUB_OUTPUT

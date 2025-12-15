@@ -5,197 +5,219 @@ on:
     types: [published]
 
 env:
+  S3_BUCKET: ${{ vars.S3_BUCKET_NAME }}
   POLICY_HUB_API_URL: ${{ vars.POLICY_HUB_API_URL }}
   AWS_REGION: ${{ vars.AWS_REGION }}
 
 jobs:
-  deliver-policies:
+  setup-delivery:
+    name: Setup Delivery Environment
     runs-on: ubuntu-latest
-    environment: production
+    outputs:
+      baseline-sha: ${{ steps.baseline.outputs.sha }}
+      head-sha: ${{ steps.head.outputs.sha }}
+      release-tag: ${{ steps.release.outputs.tag }}
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.target_commitish }}
+
+      - name: Setup environment
+        run: |
+          echo "🔧 Setting up delivery environment"
+
+          # Make scripts executable
+          chmod +x scripts/validate-policy.sh
+          chmod +x scripts/prepare-zip.sh
+
+          # Install required tools
+          sudo apt-get update && sudo apt-get install -y jq curl
+
+      - name: Get baseline SHA
+        id: baseline
+        run: |
+          baseline_sha=$(cat .state/baseline.sha)
+          echo "📍 Baseline SHA: $baseline_sha"
+          echo "sha=$baseline_sha" >> $GITHUB_OUTPUT
+
+      - name: Get head SHA
+        id: head
+        run: |
+          head_sha=${{ github.sha }}
+          echo "🎯 Head SHA: $head_sha"
+          echo "sha=$head_sha" >> $GITHUB_OUTPUT
+
+      - name: Get release info
+        id: release
+        run: |
+          release_tag=${{ github.event.release.tag_name }}
+          echo "🏷️  Release tag: $release_tag"
+          echo "tag=$release_tag" >> $GITHUB_OUTPUT
+
+  detect-changes:
+    name: Detect Changed Policies
+    needs: setup-delivery
+    runs-on: ubuntu-latest
+    outputs:
+      changed-folders: ${{ steps.detect.outputs.changed-folders }}
+      folder-count: ${{ steps.detect.outputs.folder-count }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
+
+      - name: Detect changed folders
+        id: detect
+        uses: ./.github/actions/detect-changes
+        with:
+          baseline-sha: ${{ needs.setup-delivery.outputs.baseline-sha }}
+          head-sha: ${{ needs.setup-delivery.outputs.head-sha }}
+
+  check-delivery-status:
+    name: Check Delivery Status
+    needs: [setup-delivery, detect-changes]
+    runs-on: ubuntu-latest
+    outputs:
+      pending-folders: ${{ steps.status.outputs.pending-folders }}
+      skipped-folders: ${{ steps.status.outputs.skipped-folders }}
+      pending-count: ${{ steps.status.outputs.pending-count }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
+
+      - name: Check delivery eligibility
+        id: status
+        uses: ./.github/actions/check-delivery-status
+        with:
+          changed-folders: ${{ needs.detect-changes.outputs.changed-folders }}
+          baseline-sha: ${{ needs.setup-delivery.outputs.baseline-sha }}
+
+  deliver-policies:
+    name: Deliver Policies
+    needs: [setup-delivery, check-delivery-status]
+    if: needs.check-delivery-status.outputs.pending-count > 0
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      matrix:
+        folder: ${{ fromJSON(needs.check-delivery-status.outputs.pending-folders) }}
+      fail-fast: false  # Continue with other folders even if one fails
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
+
+      - name: Setup delivery environment
+        run: |
+          chmod +x scripts/validate-policy.sh
+          chmod +x scripts/prepare-zip.sh
+          sudo apt-get update && sudo apt-get install -y jq curl
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup delivery environment
+      - name: Deliver policy
+        id: deliver
+        uses: ./.github/actions/deliver-policy
+        with:
+          folder-path: ${{ matrix.folder }}
+          s3-bucket: ${{ env.S3_BUCKET }}
+          policy-hub-url: ${{ env.POLICY_HUB_API_URL }}
+          repo-url: ${{ github.server_url }}/${{ github.repository }}
+          policy-hub-api-key: ${{ secrets.POLICY_HUB_API_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update delivery state
+        if: steps.deliver.outputs.success == 'true'
+        uses: ./.github/actions/update-state
+        with:
+          folder-path: ${{ matrix.folder }}
+          commit-sha: ${{ steps.deliver.outputs.commit-sha }}
+          delivery-timestamp: ${{ github.event.release.published_at || github.event.head_commit.timestamp }}
+
+  update-baseline:
+    name: Update Baseline
+    needs: [setup-delivery, deliver-policies]
+    if: always() && needs.deliver-policies.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
+
+      - name: Update baseline SHA
         run: |
-          # Make scripts executable
-          chmod +x scripts/prepare-zip.sh
-          chmod +x scripts/validate-policy.sh
+          new_baseline=${{ needs.setup-delivery.outputs.head-sha }}
+          echo "📍 Updating baseline to: $new_baseline"
+          echo "$new_baseline" > .state/baseline.sha
 
-          # Install jq for JSON processing
-          sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Detect candidate folders
-        id: detect
-        run: |
-          baseline_sha=$(cat .state/baseline.sha)
-          head_sha=${{ github.sha }}
-
-          echo "📊 Baseline SHA: $baseline_sha"
-          echo "📊 Head SHA: $head_sha"
-
-          # Get changed folders since baseline
-          changed_folders=$(git diff --name-only $baseline_sha..$head_sha | \
-            grep '^policies/' | \
-            cut -d'/' -f1-3 | \
-            sort -u)
-
-          echo "📁 Changed folders:"
-          echo "$changed_folders"
-
-          # Convert to JSON array for matrix
-          json_array="[]"
-          if [ -n "$changed_folders" ]; then
-            json_array="["
-            first=true
-            for folder in $changed_folders; do
-              if [ "$first" = true ]; then
-                first=false
-              else
-                json_array+=","
-              fi
-              json_array+="\"$folder\""
-            done
-            json_array+="]"
-          fi
-
-          echo "folders=$json_array" >> $GITHUB_OUTPUT
-          echo "📋 Candidate folders: $json_array"
-
-      - name: Deliver policies
-        if: steps.detect.outputs.folders != '[]'
-        run: |
-          folders="${{ steps.detect.outputs.folders }}"
-          delivered_file=".state/delivered.json"
-
-          echo "🚀 Starting folder-based delivery..."
-
-          # Process each folder
-          echo "$folders" | jq -r '.[]' | while read -r folder; do
-            echo "🔍 Processing folder: $folder"
-
-            # Extract policy and version
-            policy=$(echo $folder | cut -d'/' -f2)
-            version=$(echo $folder | cut -d'/' -f3)
-
-            # Get latest commit affecting this folder
-            latest_commit=$(git log -1 --format=%H -- "$folder")
-
-            # Check if already delivered and up to date
-            if [ -f "$delivered_file" ]; then
-              delivered_sha=$(jq -r ".\"$folder\" // empty" "$delivered_file")
-              if [ -n "$delivered_sha" ] && [ "$latest_commit" = "$delivered_sha" ]; then
-                echo "⏭️  Skipping $folder - already delivered (SHA: $delivered_sha)"
-                continue
-              fi
-            fi
-
-            echo "📦 Delivering $folder (commit: $latest_commit)"
-
-            # Validate policy first
-            if ! ./scripts/validate-policy.sh "$policy" "$version" >/dev/null 2>&1; then
-              echo "❌ Validation failed for $folder - skipping"
-              continue
-            fi
-
-            # Prepare ZIP
-            if ! ./scripts/prepare-zip.sh "$policy" "$version" >/dev/null 2>&1; then
-              echo "❌ ZIP preparation failed for $folder - skipping"
-              continue
-            fi
-
-            zip_file="$policy-$version.zip"
-
-            # Upload to S3
-            s3_path="s3://${{ vars.S3_BUCKET_NAME }}/policies/$zip_file"
-            if ! aws s3 cp "$zip_file" "$s3_path" --no-progress; then
-              echo "❌ S3 upload failed for $folder - will retry next release"
-              rm -f "$zip_file"
-              continue
-            fi
-
-            echo "✅ Uploaded $folder to S3"
-
-            # Sync with Policy Hub
-            repo_path="${{ github.repository }}"
-            source_url="https://${{ vars.S3_BUCKET_NAME }}.s3.${{ env.AWS_REGION }}.amazonaws.com/policies/$zip_file"
-            base_url="https://raw.githubusercontent.com/$repo_path/main/$folder"
-
-            # Read metadata
-            metadata=$(cat "$folder/metadata.json" 2>/dev/null || echo "{}")
-
-            payload=$(cat <<EOF
-          {
-            "policyName": "$policy",
-            "version": "$version",
-            "sourceType": "s3",
-            "sourceUrl": "$source_url",
-            "definitionUrl": "$base_url/policy-definition.yaml",
-            "metadata": $metadata,
-            "docsBaseUrl": "$base_url/docs/",
-            "assetsBaseUrl": "$base_url/assets/",
-            "idempotencyKey": "$folder:$latest_commit"
-          }
-          EOF
-          )
-
-            response=$(curl -X POST "${{ env.POLICY_HUB_API_URL }}/sync" \
-              -H "Authorization: Bearer ${{ secrets.POLICY_HUB_API_KEY }}" \
-              -H "Content-Type: application/json" \
-              -H "ngrok-skip-browser-warning: true" \
-              -d "$payload" \
-              --max-time 30 \
-              -w "HTTP_CODE:%{http_code}" \
-              -s)
-
-            http_code=$(echo "$response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
-            response_body=$(echo "$response" | sed 's/HTTP_CODE:[0-9]*$//')
-
-            if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-              api_success=$(echo "$response_body" | jq -r '.success // false' 2>/dev/null || echo "false")
-
-              if [[ "$api_success" == "true" ]]; then
-                echo "✅ Successfully delivered $folder"
-
-                # Update delivered state
-                jq ".\"$folder\" = \"$latest_commit\"" "$delivered_file" > "${delivered_file}.tmp"
-                mv "${delivered_file}.tmp" "$delivered_file"
-
-                echo "📝 Updated delivery state for $folder"
-              else
-                echo "❌ Policy Hub sync failed for $folder - will retry next release"
-              fi
-            else
-              echo "❌ Policy Hub sync failed (HTTP $http_code) for $folder - will retry next release"
-            fi
-
-            # Cleanup
-            rm -f "$zip_file"
-
-          done
-
-          echo "🎉 Delivery process completed"
-
-      - name: Commit state updates
+      - name: Commit state changes
         run: |
           if git diff --quiet .state/; then
             echo "📋 No state changes to commit"
-          else
-            echo "📝 Committing state updates..."
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git add .state/
-            git commit -m "Update delivery state after release ${{ github.event.release.tag_name }}"
-            git push
-            echo "✅ State updates committed and pushed"
+            exit 0
           fi
+
+          echo "📝 Committing delivery state updates"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .state/
+          git commit -m "Update delivery state after release ${{ needs.setup-delivery.outputs.release-tag }}
+
+          - Baseline updated to ${{ needs.setup-delivery.outputs.head-sha }}
+          - Delivery state synchronized" || true
+
+          git push origin ${{ github.event.release.target_commitish }} || true
+
+  delivery-summary:
+    name: Delivery Summary
+    needs: [detect-changes, check-delivery-status, deliver-policies]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate delivery report
+        run: |
+          echo "📊 Delivery Summary for Release ${{ github.event.release.tag_name }}"
+          echo "=================================================="
+
+          echo ""
+          echo "🔍 Detection Results:"
+          echo "  - Changed folders: ${{ needs.detect-changes.outputs.folder-count }}"
+
+          echo ""
+          echo "📋 Delivery Status:"
+          echo "  - Pending delivery: ${{ needs.check-delivery-status.outputs.pending-count }}"
+          echo "  - Skipped (already delivered): $(echo '${{ needs.check-delivery-status.outputs.skipped-folders }}' | jq '. | length')"
+
+          echo ""
+          echo "🚀 Delivery Results:"
+          if [ "${{ needs.deliver-policies.result }}" = "success" ]; then
+            echo "  ✅ All deliveries completed successfully"
+          elif [ "${{ needs.deliver-policies.result }}" = "failure" ]; then
+            echo "  ❌ Some deliveries failed (will retry on next release)"
+          elif [ "${{ needs.deliver-policies.result }}" = "skipped" ]; then
+            echo "  ⏭️  No deliveries needed"
+          else
+            echo "  ⚠️  Delivery status unknown"
+          fi
+
+          echo ""
+          echo "🔗 Release: ${{ github.event.release.html_url }}"
+          echo "📅 Published: ${{ github.event.release.published_at }}"

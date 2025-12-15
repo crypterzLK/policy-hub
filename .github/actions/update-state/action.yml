@@ -1,0 +1,57 @@
+name: 'Update Delivery State'
+description: 'Updates the delivery state file with successful deliveries'
+inputs:
+  folder-path:
+    description: 'The policy folder path that was successfully delivered'
+    required: true
+  commit-sha:
+    description: 'The commit SHA of the delivered folder'
+    required: true
+  delivery-timestamp:
+    description: 'Timestamp of successful delivery'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Update delivery state
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        folder="${{ inputs.folder-path }}"
+        commit_sha="${{ inputs.commit-sha }}"
+        timestamp="${{ inputs.delivery-timestamp }}"
+
+        state_file=".state/delivered.json"
+
+        echo "📝 Updating delivery state for $folder"
+
+        # Create backup
+        if [ -f "$state_file" ]; then
+          cp "$state_file" "${state_file}.backup"
+        fi
+
+        # Update the deliveries object
+        jq --arg folder "$folder" \
+           --arg commit "$commit_sha" \
+           --arg timestamp "$timestamp" \
+           '.deliveries[$folder] = {
+             commitSha: $commit,
+             deliveredAt: $timestamp,
+             status: "delivered"
+           } | ._metadata.lastUpdated = $timestamp' \
+           "$state_file" > "${state_file}.tmp"
+
+        # Validate JSON
+        if jq empty "${state_file}.tmp" >/dev/null 2>&1; then
+          mv "${state_file}.tmp" "$state_file"
+          echo "✅ Delivery state updated for $folder"
+        else
+          echo "❌ Failed to update state file - invalid JSON"
+          rm -f "${state_file}.tmp"
+          exit 1
+        fi
+
+        # Show updated state
+        echo "📊 Current deliveries:"
+        jq '.deliveries | keys[]' "$state_file" | sed 's/^"//' | sed 's/"$//' | sed 's/^/  /' || true

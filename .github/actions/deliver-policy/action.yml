@@ -1,0 +1,221 @@
+name: 'Deliver Policy'
+description: 'Delivers a single policy folder to Policy Hub'
+inputs:
+  folder-path:
+    description: 'The policy folder path (e.g., policies/set-header/v1.0.0)'
+    required: true
+  s3-bucket:
+    description: 'S3 bucket name for uploads'
+    required: true
+  policy-hub-url:
+    description: 'Policy Hub API URL'
+    required: true
+  repo-url:
+    description: 'GitHub repository URL'
+    required: true
+  policy-hub-api-key:
+    description: 'Policy Hub API key'
+    required: true
+  aws-region:
+    description: 'AWS region'
+    required: true
+outputs:
+  success:
+    description: 'Whether delivery succeeded'
+    value: ${{ steps.final.outputs.success }}
+  commit-sha:
+    description: 'The commit SHA of the delivered folder'
+    value: ${{ steps.final.outputs.commit-sha }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Parse folder details
+      id: parse
+      shell: bash
+      run: |
+        folder="${{ inputs.folder-path }}"
+        policy=$(echo "$folder" | cut -d'/' -f2)
+        version=$(echo "$folder" | cut -d'/' -f3)
+
+        echo "📦 Processing policy: $policy v$version"
+        echo "policy=$policy" >> $GITHUB_OUTPUT
+        echo "version=$version" >> $GITHUB_OUTPUT
+
+    - name: Get folder commit SHA
+      id: commit
+      shell: bash
+      run: |
+        folder="${{ inputs.folder-path }}"
+        commit_sha=$(git log -1 --format=%H -- "$folder")
+        echo "🔗 Folder commit: $commit_sha"
+        echo "commit-sha=$commit_sha" >> $GITHUB_OUTPUT
+
+    - name: Validate policy
+      id: validate
+      shell: bash
+      run: |
+        policy="${{ steps.parse.outputs.policy }}"
+        version="${{ steps.parse.outputs.version }}"
+
+        echo "🔍 Validating policy $policy/$version"
+
+        if ./scripts/validate-policy.sh "$policy" "$version"; then
+          echo "✅ Policy validation passed"
+          echo "valid=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Policy validation failed"
+          echo "valid=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: Prepare ZIP package
+      id: package
+      if: steps.validate.outputs.valid == 'true'
+      shell: bash
+      run: |
+        policy="${{ steps.parse.outputs.policy }}"
+        version="${{ steps.parse.outputs.version }}"
+
+        echo "📦 Preparing ZIP for $policy/$version"
+
+        if ./scripts/prepare-zip.sh "$policy" "$version"; then
+          echo "✅ ZIP preparation successful"
+          echo "zip-file=$policy-$version.zip" >> $GITHUB_OUTPUT
+        else
+          echo "❌ ZIP preparation failed"
+          exit 1
+        fi
+
+    - name: Upload to S3
+      id: upload
+      if: steps.package.outputs.zip-file
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+      run: |
+        zip_file="${{ steps.package.outputs.zip-file }}"
+        s3_bucket="${{ inputs.s3-bucket }}"
+        s3_path="s3://$s3_bucket/policies/$zip_file"
+
+        echo "☁️  Uploading $zip_file to $s3_path"
+
+        if aws s3 cp "$zip_file" "$s3_path" --no-progress; then
+          echo "✅ S3 upload successful"
+          echo "s3-url=https://$s3_bucket.s3.$AWS_REGION.amazonaws.com/policies/$zip_file" >> $GITHUB_OUTPUT
+        else
+          echo "❌ S3 upload failed"
+          rm -f "$zip_file"
+          exit 1
+        fi
+
+    - name: Sync with Policy Hub
+      id: sync
+      if: steps.upload.outputs.s3-url
+      shell: bash
+      run: |
+        folder="${{ inputs.folder-path }}"
+        policy="${{ steps.parse.outputs.policy }}"
+        version="${{ steps.parse.outputs.version }}"
+        commit_sha="${{ steps.commit.outputs.commit-sha }}"
+        s3_url="${{ steps.upload.outputs.s3-url }}"
+        policy_hub_url="${{ inputs.policy-hub-url }}"
+        repo_url="${{ inputs.repo-url }}"
+
+        echo "🔗 Syncing with Policy Hub"
+
+        # Read metadata
+        metadata_file="$folder/metadata.json"
+        if [ -f "$metadata_file" ]; then
+          metadata=$(cat "$metadata_file")
+        else
+          echo "⚠️  metadata.json not found, using defaults"
+          metadata="{}"
+        fi
+
+        # Construct URLs
+        base_url="https://raw.githubusercontent.com/$(echo "$repo_url" | sed 's|https://github.com/||')/main/$folder"
+        definition_url="$base_url/policy-definition.yaml"
+        docs_base_url="$base_url/docs/"
+        assets_base_url="$base_url/assets/"
+
+        # Create idempotency key
+        idempotency_key="$folder:$commit_sha"
+
+        # Construct API payload
+        payload=$(cat <<EOF
+        {
+          "policyName": "$policy",
+          "version": "$version",
+          "sourceType": "s3",
+          "sourceUrl": "$s3_url",
+          "definitionUrl": "$definition_url",
+          "metadata": $metadata,
+          "docsBaseUrl": "$docs_base_url",
+          "assetsBaseUrl": "$assets_base_url",
+          "idempotencyKey": "$idempotency_key",
+          "commitSha": "$commit_sha"
+        }
+        EOF
+        )
+
+        echo "📤 Sending payload to $policy_hub_url/sync"
+
+        # Make API call
+        response=$(curl -X POST "$policy_hub_url/sync" \
+          -H "Authorization: Bearer ${{ inputs.policy-hub-api-key }}" \
+          -H "Content-Type: application/json" \
+          -H "ngrok-skip-browser-warning: true" \
+          -d "$payload" \
+          --max-time 30 \
+          -w "HTTP_CODE:%{http_code}" \
+          -s)
+
+        http_code=$(echo "$response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
+        response_body=$(echo "$response" | sed 's/HTTP_CODE:[0-9]*$//')
+
+        if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+          api_success=$(echo "$response_body" | jq -r '.success // false' 2>/dev/null || echo "false")
+
+          if [[ "$api_success" == "true" ]]; then
+            echo "✅ Policy Hub sync successful"
+            echo "sync-success=true" >> $GITHUB_OUTPUT
+          else
+            error_msg=$(echo "$response_body" | jq -r '.error // "Unknown error"' 2>/dev/null)
+            echo "❌ Policy Hub API returned success=false: $error_msg"
+            echo "sync-success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        else
+          echo "❌ Policy Hub sync failed (HTTP $http_code)"
+          echo "Response: $response_body"
+          echo "sync-success=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        zip_file="${{ steps.package.outputs.zip-file }}"
+        if [ -n "$zip_file" ]; then
+          rm -f "$zip_file"
+        fi
+
+    - name: Final result
+      id: final
+      shell: bash
+      run: |
+        folder="${{ inputs.folder-path }}"
+        commit_sha="${{ steps.commit.outputs.commit-sha }}"
+
+        if [[ "${{ steps.validate.outputs.valid }}" == "true" && \
+              "${{ steps.upload.outputs.s3-url }}" != "" && \
+              "${{ steps.sync.outputs.sync-success }}" == "true" ]]; then
+          echo "✅ Delivery successful for $folder"
+          echo "success=true" >> $GITHUB_OUTPUT
+          echo "commit-sha=$commit_sha" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Delivery failed for $folder"
+          echo "success=false" >> $GITHUB_OUTPUT
+          echo "commit-sha=" >> $GITHUB_OUTPUT
+        fi
