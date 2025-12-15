@@ -81,12 +81,15 @@ jobs:
             fi
           fi
           
-          # Priority 2: Fallback to latest tag if no valid SHA and tags exist (for migration)
+          # Priority 2: Fallback to previous tag if no valid SHA and tags exist (for migration)
           if [ -z "$base_sha" ]; then
-            latest_tag=$(git tag --sort=-version:refname | head -1 || echo "")
-            if [ -n "$latest_tag" ] && git rev-parse --verify "$latest_tag" >/dev/null 2>&1; then
-              base_sha="$latest_tag"
-              echo "✅ Using latest tag as fallback: $base_sha"
+            # Exclude the current release tag and get the previous one
+            previous_tag=$(git tag --sort=-version:refname | grep -v "^${current_tag}$" | head -1 || echo "")
+            if [ -n "$previous_tag" ] && git rev-parse --verify "$previous_tag" >/dev/null 2>&1; then
+              base_sha="$previous_tag"
+              echo "✅ Using previous release tag as fallback: $base_sha"
+            else
+              echo "ℹ️  No previous release tag found (this might be the first release)"
             fi
           fi
           
