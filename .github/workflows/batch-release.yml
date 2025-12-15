@@ -217,6 +217,7 @@ jobs:
         with:
           policy: ${{ matrix.version-item.policy }}
           version: ${{ matrix.version-item.version }}
+          release-tag: ${{ github.event.release.tag_name }}
           s3-bucket: ${{ vars.S3_BUCKET_NAME }}
           policy-hub-url: ${{ vars.POLICY_HUB_API_URL }}
           repo-url: ${{ github.server_url }}/${{ github.repository }}

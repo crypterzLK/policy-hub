@@ -8,6 +8,9 @@ inputs:
   version:
     description: 'Policy version'
     required: true
+  release-tag:
+    description: 'GitHub release tag'
+    required: true
   s3-bucket:
     description: 'S3 bucket name'
     required: true
@@ -77,8 +80,8 @@ runs:
           fi
         else
           # Upload to GitHub Release
-          if gh release upload "${{ inputs.version }}" "$zip_file" --clobber; then
-            echo "✅ Uploaded to GitHub release ${{ inputs.version }}"
+          if gh release upload "${{ inputs.release-tag }}" "$zip_file" --clobber; then
+            echo "✅ Uploaded to GitHub release ${{ inputs.release-tag }}"
             echo "success=true" >> $GITHUB_OUTPUT
           else
             echo "❌ GitHub release upload failed"
