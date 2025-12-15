@@ -5,8 +5,6 @@
   "provider": "Community",
   "categories": ["transformations"],
   "tags": ["header", "manipulation"],
-  "logoUrl": "assets/icon.svg",
-  "bannerUrl": "assets/banner.png",
   "supportedPlatforms": ["apim-4.5+"],
   "description": "Adds or modifies a header in the request.",
   "documentation": {
