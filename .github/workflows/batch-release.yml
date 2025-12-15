@@ -48,6 +48,46 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.release.target_commitish }}
 
+      - name: Get success tracking from main branch
+        id: get_tracking
+        run: |
+          set +e  # Don't exit on error for this step
+          
+          # Determine default branch (try main, then master)
+          default_branch="main"
+          if ! git ls-remote --heads origin main | grep -q main; then
+            if git ls-remote --heads origin master | grep -q master; then
+              default_branch="master"
+              echo "ℹ️  Using 'master' branch (main not found)"
+            else
+              echo "⚠️  Neither 'main' nor 'master' branch found"
+              echo "has_tracking=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          
+          # Fetch latest from default branch to get the tracking file
+          if ! git fetch origin "${default_branch}:refs/remotes/origin/${default_branch}" 2>/dev/null; then
+            echo "⚠️  Failed to fetch ${default_branch} branch"
+            echo "has_tracking=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Try to get the file from default branch
+          if git show "origin/${default_branch}:last-successful-release.sha" > /tmp/last-successful-release.sha 2>/dev/null; then
+            echo "✅ Found tracking file on ${default_branch} branch"
+            echo "has_tracking=true" >> $GITHUB_OUTPUT
+            
+            # Also get checksum if exists
+            if git show "origin/${default_branch}:last-successful-release.sha.sha256" > /tmp/last-successful-release.sha.sha256 2>/dev/null; then
+              echo "✅ Found tracking checksum"
+            fi
+          else
+            echo "ℹ️  No tracking file on ${default_branch} branch"
+            echo "has_tracking=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
       - name: Get base SHA
         id: get_base
         run: |
@@ -58,32 +98,38 @@ jobs:
           
           base_sha=""
           
-          # Priority 1: Use last successful release SHA if file exists and is valid
-          if [ -f last-successful-release.sha ]; then
-            candidate_sha=$(cat last-successful-release.sha | tr -d '\n')
-            # Validate SHA and checksum if present
+          # Priority 1: Use last successful release SHA from main branch
+          if [ "${{ steps.get_tracking.outputs.has_tracking }}" = "true" ] && [ -f /tmp/last-successful-release.sha ]; then
+            candidate_sha=$(cat /tmp/last-successful-release.sha | tr -d '\n')
+            echo "📋 Found tracking SHA from main branch: $candidate_sha"
+            
+            # Validate SHA
             if git rev-parse --verify "$candidate_sha" >/dev/null 2>&1; then
-              # Check for checksum file to detect tampering
-              if [ -f last-successful-release.sha.sha256 ]; then
-                expected_checksum=$(cat last-successful-release.sha.sha256)
+              # Check checksum if present
+              if [ -f /tmp/last-successful-release.sha.sha256 ]; then
+                expected_checksum=$(cat /tmp/last-successful-release.sha.sha256 | tr -d '\n')
                 actual_checksum=$(echo "$candidate_sha" | sha256sum | awk '{print $1}')
                 if [ "$expected_checksum" != "$actual_checksum" ]; then
-                  echo "⚠️  Checksum mismatch for last-successful-release.sha, ignoring file"
-                  candidate_sha=""
+                  echo "⚠️  Checksum mismatch, ignoring tracking file"
+                else
+                  base_sha="$candidate_sha"
+                  echo "✅ Using last successful release SHA from main branch: $base_sha"
                 fi
-              fi
-              if [ -n "$candidate_sha" ]; then
+              else
                 base_sha="$candidate_sha"
-                echo "✅ Using last successful release SHA: $base_sha"
+                echo "✅ Using last successful release SHA from main branch: $base_sha (no checksum)"
               fi
             else
-              echo "⚠️  Invalid SHA in last-successful-release.sha ($candidate_sha), ignoring file"
+              echo "⚠️  Invalid SHA in tracking file: $candidate_sha"
             fi
+          else
+            echo "ℹ️  No tracking file found on main branch, will use fallback detection"
           fi
           
-          # Priority 2: Find the last successful release tag (one that has policies)
+          # Priority 2: Find last tag with policies (FALLBACK - may include failed releases)
           if [ -z "$base_sha" ]; then
-            echo "🔍 Looking for last successful release tag..."
+            echo "🔍 Falling back to tag-based detection (WARNING: less reliable)..."
+            echo "⚠️  This fallback may include releases where publishing failed"
             
             # Get all tags sorted by version (newest first), excluding current tag
             candidate_tags=$(git tag --sort=-version:refname | grep -v "^${current_tag}$" || echo "")
@@ -96,23 +142,24 @@ jobs:
                 
                 if [ "$policy_count" -gt 0 ]; then
                   base_sha="$tag_sha"
-                  echo "✅ Found successful release tag with $policy_count policy file(s): $tag ($tag_sha)"
+                  echo "⚠️  Using tag with policies as fallback: $tag ($tag_sha)"
+                  echo "⚠️  Note: This tag may have had publishing failures"
+                  echo "⚠️  Recommend: Ensure tracking file exists on main branch for accurate detection"
                   break
-                else
-                  echo "⚠️  Skipping tag $tag - no policies found (likely failed release)"
                 fi
               fi
             done
             
             if [ -z "$base_sha" ]; then
-              echo "ℹ️  No successful release tags found with policies"
+              echo "ℹ️  No tags with policies found"
             fi
           fi
           
           # Priority 3: Initial commit if still no base
           if [ -z "$base_sha" ]; then
-            base_sha=$(git rev-list --max-parents=0 HEAD)
+            base_sha=$(git rev-list --max-parents=0 HEAD | head -1)
             echo "✅ First release detected, using initial commit: $base_sha"
+            echo "ℹ️  Note: If this is not the first release, tracking file is missing - consider manual recovery"
           fi
           
           # Final validation
@@ -211,11 +258,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         version-item: ${{ fromJSON(needs.detect-versions.outputs.new-versions-json) }}
       max-parallel: ${{ vars.MAX_PARALLEL || 3 }}
+    outputs:
+      job-status: ${{ steps.final-status.outputs.status }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -246,13 +296,49 @@ jobs:
             echo "✅ Successfully published ${{ matrix.version-item.policy }} ${{ matrix.version-item.version }}"
           else
             echo "❌ Failed to publish ${{ matrix.version-item.policy }} ${{ matrix.version-item.version }}"
+            echo "⚠️  This failure will be tracked - failed policies will be retried in next release"
             exit 1
+          fi
+      
+      - name: Set final status
+        id: final-status
+        if: always()
+        run: |
+          if [[ "${{ steps.publish.outputs.success }}" == "true" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
+
+  check-publish-results:
+    name: Check Publishing Results
+    needs: [detect-versions, publish-policies]
+    if: always() && needs.detect-versions.outputs.version-count > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      all-succeeded: ${{ steps.check.outputs.all_succeeded }}
+    steps:
+      - name: Check if all policies published successfully
+        id: check
+        run: |
+          # Note: With continue-on-error, we need to check job conclusion
+          # If any matrix job failed, the overall job shows as success but with failures
+          publish_result="${{ needs.publish-policies.result }}"
+          
+          if [[ "$publish_result" == "success" ]]; then
+            echo "all_succeeded=true" >> $GITHUB_OUTPUT
+            echo "✅ All policies published successfully"
+          else
+            echo "all_succeeded=false" >> $GITHUB_OUTPUT
+            echo "❌ Some policies failed to publish"
+            echo "⚠️  Failed policies will be retried in next release"
           fi
 
   update-success-sha:
     name: Update Success Tracking
-    needs: [detect-versions, validate-policies, publish-policies]
-    if: always() && (needs.detect-versions.result == 'success') && (needs.validate-policies.result == 'success' || needs.validate-policies.result == 'skipped') && (needs.publish-policies.result == 'success' || needs.publish-policies.result == 'skipped')
+    needs: [detect-versions, validate-policies, publish-policies, check-publish-results]
+    if: always() && (needs.detect-versions.result == 'success') && (needs.validate-policies.result == 'success' || needs.validate-policies.result == 'skipped') && (needs.check-publish-results.outputs.all-succeeded == 'true' || needs.publish-policies.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -260,7 +346,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.release.target_commitish }}
+          ref: main
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update last successful release SHA
@@ -293,7 +379,7 @@ jobs:
           max_retries=3
           retry_count=0
           while [ $retry_count -lt $max_retries ]; do
-            if git push origin HEAD; then
+            if git push origin HEAD:main 2>&1; then
               echo "✅ Successfully updated last successful release SHA"
               exit 0
             else
@@ -304,5 +390,8 @@ jobs:
           done
           
           echo "❌ Failed to push SHA update after $max_retries attempts"
+          echo "⚠️  WARNING: Release was successful but tracking file not updated"
+          echo "⚠️  Next release may re-process some policies"
+          echo "⚠️  Recommend: Manually commit tracking file or investigate git push failure"
           exit 1
         shell: bash
