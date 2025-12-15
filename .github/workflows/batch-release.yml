@@ -251,8 +251,8 @@ jobs:
 
   update-success-sha:
     name: Update Success Tracking
-    needs: [detect-versions, validate-policies]
-    if: success()
+    needs: [detect-versions, validate-policies, publish-policies]
+    if: always() && (needs.detect-versions.result == 'success') && (needs.validate-policies.result == 'success' || needs.validate-policies.result == 'skipped') && (needs.publish-policies.result == 'success' || needs.publish-policies.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
