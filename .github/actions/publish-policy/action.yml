@@ -23,6 +23,9 @@ inputs:
   policy-hub-api-key:
     description: 'Policy Hub API key'
     required: true
+  commit:
+    description: 'Commit SHA for the policy content (used as idempotency key)'
+    required: false
   source-type:
     description: 'Source type: github or s3'
     required: false
@@ -205,6 +208,7 @@ runs:
         {
           "policyName": "${{ inputs.policy }}",
           "version": "${{ inputs.version }}",
+          "commit": "${{ inputs.commit }}",
           "sourceType": "$source_type",
           "sourceUrl": "$source_url",
           "definitionUrl": "$definition_url",
@@ -233,11 +237,15 @@ runs:
         retry_count=0
         success=false
         
+        # Prepare idempotency key
+        idempotency_key="${{ inputs.policy }}:${{ inputs.version }}:${{ inputs.commit }}"
+
         while [ $retry_count -lt $max_retries ] && [ "$success" = false ]; do
           echo "Attempting sync (attempt $((retry_count + 1))/$max_retries)..."
           
           response=$(curl -X POST "$sync_url" \
             -H "Authorization: Bearer $POLICY_HUB_API_KEY" \
+            -H "Idempotency-Key: $idempotency_key" \
             -H "Content-Type: application/json" \
             -H "User-Agent: GitHub-Actions-Policy-Publish" \
             -H "ngrok-skip-browser-warning: true" \
