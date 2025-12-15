@@ -196,7 +196,7 @@ jobs:
       fail-fast: false
       matrix:
         version-item: ${{ fromJSON(needs.detect-versions.outputs.new-versions-json) }}
-      max-parallel: ${{ fromJSON(env.MAX_PARALLEL) }}
+      max-parallel: ${{ vars.MAX_PARALLEL || 3 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
