@@ -109,11 +109,20 @@ runs:
           logo_url=$(jq -r '.logoUrl // ""' "$policy_dir/metadata.json")
           banner_url=$(jq -r '.bannerUrl // ""' "$policy_dir/metadata.json")
           
-          # Convert GitHub URLs to raw if needed
-          if [[ "$logo_url" =~ ^https://github\.com/ ]]; then
+          # Convert logo and banner URLs to complete raw GitHub URLs
+          if [[ "$logo_url" != "" && ! "$logo_url" =~ ^https?:// ]]; then
+            # Convert relative paths to raw GitHub URLs
+            logo_url="$base_url/$logo_url"
+          elif [[ "$logo_url" =~ ^https://github\.com/ ]]; then
+            # Convert GitHub blob URLs to raw
             logo_url=$(echo "$logo_url" | sed 's|https://github.com/|https://raw.githubusercontent.com/|' | sed 's|/blob/|/|')
           fi
-          if [[ "$banner_url" =~ ^https://github\.com/ ]]; then
+          
+          if [[ "$banner_url" != "" && ! "$banner_url" =~ ^https?:// ]]; then
+            # Convert relative paths to raw GitHub URLs
+            banner_url="$base_url/$banner_url"
+          elif [[ "$banner_url" =~ ^https://github\.com/ ]]; then
+            # Convert GitHub blob URLs to raw
             banner_url=$(echo "$banner_url" | sed 's|https://github.com/|https://raw.githubusercontent.com/|' | sed 's|/blob/|/|')
           fi
         else
@@ -149,15 +158,47 @@ runs:
         if [[ "$source_type" == "s3" ]]; then
           source_url="https://${{ inputs.s3-bucket }}.s3.${{ env.AWS_REGION || 'us-east-1' }}.amazonaws.com/policies/${{ inputs.policy }}-${{ inputs.version }}.zip"
         else
-          # GitHub raw URL for the policy directory
-          source_url="https://raw.githubusercontent.com/$repo_path/main/policies/${{ inputs.policy }}/${{ inputs.version }}"
+          # GitHub release ZIP file URL
+          source_url="https://github.com/$repo_path/releases/download/${{ inputs.release-tag }}/${{ inputs.policy }}-${{ inputs.version }}.zip"
         fi
 
         # Always use GitHub raw URLs for policy resources (definition, docs, assets)
         base_url="https://raw.githubusercontent.com/$repo_path/main/$policy_dir"
         definition_url="$base_url/policy-definition.yaml"
         docs_base_url="$base_url/docs/"
-        assets_base_url="$base_url/assets/"
+        
+        # Check if assets folder exists
+        if [ -d "$policy_dir/assets" ]; then
+          assets_base_url="$base_url/assets/"
+        else
+          assets_base_url="null"
+        fi
+
+        # Read documentation from metadata.json
+        documentation="{"
+        first_doc=true
+        
+        if [ -f "$policy_dir/metadata.json" ]; then
+          # Extract documentation paths from metadata.json
+          doc_keys=$(jq -r '.documentation // {} | keys[]' "$policy_dir/metadata.json" 2>/dev/null || echo "")
+          
+          for doc_key in $doc_keys; do
+            doc_path=$(jq -r ".documentation.\"$doc_key\"" "$policy_dir/metadata.json" 2>/dev/null || echo "")
+            if [ -n "$doc_path" ]; then
+              doc_url="$base_url/$doc_path"
+              
+              if [ "$first_doc" = true ]; then
+                first_doc=false
+              else
+                documentation="$documentation,"
+              fi
+              
+              documentation="$documentation \"$doc_key\": \"$doc_url\""
+            fi
+          done
+        fi
+        
+        documentation="$documentation }"
 
         # Construct API payload matching the expected structure
         payload=$(cat <<EOF
@@ -177,12 +218,8 @@ runs:
             "logoUrl": "$logo_url",
             "bannerUrl": "$banner_url"
           },
-          "documentation": {
-            "configuration": "$docs_base_url/configuration.md",
-            "examples": "$docs_base_url/examples.md",
-            "overview": "$docs_base_url/overview.md"
-          },
-          "assetsBaseUrl": "$assets_base_url"
+          "documentation": $documentation,
+          "assetsBaseUrl": $assets_base_url
         }
         EOF
         )

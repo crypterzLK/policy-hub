@@ -150,6 +150,7 @@ validate_go_build() {
 
 validate_metadata() {
     local metadata_file="$1"
+    local policy_dir="$2"
     local errors=0
 
     echo "🔍 Validating metadata: $metadata_file"
@@ -182,6 +183,64 @@ validate_metadata() {
             fi
         fi
     done <<< "$(get_config_array "requiredMetadataFields")"
+
+    # Validate file references in metadata
+    validate_metadata_file_references "$metadata_file" "$policy_dir"
+    ref_errors=$?
+    errors=$((errors + ref_errors))
+
+    return $errors
+}
+
+validate_metadata_file_references() {
+    local metadata_file="$1"
+    local policy_dir="$2"
+    local errors=0
+
+    echo "🔍 Validating metadata file references"
+
+    # Check logoUrl file exists
+    local logo_url=$(jq -r '.logoUrl // ""' "$metadata_file")
+    if [ -n "$logo_url" ] && [[ ! "$logo_url" =~ ^https?:// ]]; then
+        if [ ! -f "$policy_dir/$logo_url" ]; then
+            log_error "Logo file referenced in metadata does not exist: $logo_url"
+            ((errors++))
+        else
+            log_success "Logo file exists: $logo_url"
+        fi
+    elif [ -n "$logo_url" ]; then
+        log_success "Logo URL is external: $logo_url"
+    fi
+
+    # Check bannerUrl file exists
+    local banner_url=$(jq -r '.bannerUrl // ""' "$metadata_file")
+    if [ -n "$banner_url" ] && [[ ! "$banner_url" =~ ^https?:// ]]; then
+        if [ ! -f "$policy_dir/$banner_url" ]; then
+            log_error "Banner file referenced in metadata does not exist: $banner_url"
+            ((errors++))
+        else
+            log_success "Banner file exists: $banner_url"
+        fi
+    elif [ -n "$banner_url" ]; then
+        log_success "Banner URL is external: $banner_url"
+    fi
+
+    # Check documentation files exist
+    if jq -e '.documentation' "$metadata_file" >/dev/null 2>&1; then
+        local doc_keys=$(jq -r '.documentation | keys[]' "$metadata_file" 2>/dev/null || echo "")
+        
+        for doc_key in $doc_keys; do
+            local doc_path=$(jq -r ".documentation.\"$doc_key\"" "$metadata_file" 2>/dev/null || echo "")
+            if [ -n "$doc_path" ]; then
+                if [ ! -f "$policy_dir/$doc_path" ]; then
+                    log_error "Documentation file referenced in metadata does not exist: $doc_path (key: $doc_key)"
+                    ((errors++))
+                else
+                    log_success "Documentation file exists: $doc_path (key: $doc_key)"
+                fi
+            fi
+        done
+    fi
 
     return $errors
 }
@@ -286,7 +345,7 @@ main() {
     total_errors=$((total_errors + structure_errors))
 
     # Validate metadata
-    validate_metadata "$policy_dir/metadata.json"
+    validate_metadata "$policy_dir/metadata.json" "$policy_dir"
     metadata_errors=$?
     total_errors=$((total_errors + metadata_errors))
 
