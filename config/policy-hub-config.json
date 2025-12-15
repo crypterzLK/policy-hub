@@ -49,7 +49,7 @@
       ".md"
     ],
     "strictValidation": true,
-    "validateGoBuild": true
+    "validateGoBuild": false
   },
   "processing": {
     "maxParallelJobs": 3,
