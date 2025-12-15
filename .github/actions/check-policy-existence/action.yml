@@ -1,0 +1,101 @@
+name: 'Check Policy Existence'
+description: 'Check if policy versions already exist in Policy Hub'
+
+inputs:
+  policy-hub-url:
+    description: 'Policy Hub API base URL'
+    required: true
+  policies:
+    description: 'Space-separated list of policy/version pairs (e.g., "rate-limiter/v1.0.0 set-header/v1.0.0")'
+    required: true
+
+outputs:
+  all-new:
+    description: 'Whether all policies are new (true/false)'
+    value: ${{ steps.check.outputs.all_new }}
+  existing-policies:
+    description: 'List of policies that already exist'
+    value: ${{ steps.check.outputs.existing_policies }}
+  new-policies:
+    description: 'List of policies that do not exist'
+    value: ${{ steps.check.outputs.new_policies }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check policy existence
+      id: check
+      run: |
+        set -euo pipefail
+        
+        echo "🔍 Checking if policies already exist in Policy Hub..."
+        
+        policy_hub_url="${{ inputs.policy-hub-url }}"
+        policies="${{ inputs.policies }}"
+        
+        existing_policies=""
+        new_policies=""
+        all_new=true
+        
+        for version_path in $policies; do
+          policy=$(echo $version_path | cut -d'/' -f1)
+          version=$(echo $version_path | cut -d'/' -f2)
+          
+          echo "📋 Checking $policy/$version..."
+          
+          # Query Policy Hub API
+          check_url="${policy_hub_url}/policies/${policy}/versions/${version}"
+          
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "ngrok-skip-browser-warning: true" \
+            -H "User-Agent: GitHub-Actions-Policy-Check" \
+            --max-time 10 \
+            --connect-timeout 5 \
+            "$check_url" 2>/dev/null || echo "000")
+          
+          if [ "$response" = "200" ]; then
+            echo "⚠️  Policy $policy/$version already exists in Policy Hub"
+            existing_policies="$existing_policies $version_path"
+            all_new=false
+          elif [ "$response" = "404" ]; then
+            echo "✅ Policy $policy/$version does not exist - ready for publishing"
+            new_policies="$new_policies $version_path"
+          elif [ "$response" = "000" ]; then
+            echo "⚠️  Could not reach Policy Hub API (network error) for $policy/$version"
+            echo "⚠️  Treating as new policy (existence unknown)"
+            new_policies="$new_policies $version_path"
+          else
+            echo "⚠️  Unexpected response code: $response for $policy/$version"
+            echo "⚠️  Treating as new policy"
+            new_policies="$new_policies $version_path"
+          fi
+        done
+        
+        # Clean up whitespace
+        existing_policies=$(echo $existing_policies | xargs)
+        new_policies=$(echo $new_policies | xargs)
+        
+        # Set outputs
+        echo "all_new=$all_new" >> $GITHUB_OUTPUT
+        echo "existing_policies=$existing_policies" >> $GITHUB_OUTPUT
+        echo "new_policies=$new_policies" >> $GITHUB_OUTPUT
+        
+        # Summary
+        echo ""
+        echo "📊 Summary:"
+        if [ -n "$existing_policies" ]; then
+          echo "  Existing policies (will be skipped or updated):"
+          for policy in $existing_policies; do
+            echo "    - $policy"
+          done
+        fi
+        if [ -n "$new_policies" ]; then
+          echo "  New policies (will be published):"
+          for policy in $new_policies; do
+            echo "    - $policy"
+          done
+        fi
+        
+        echo ""
+        echo "ℹ️  Note: Duplicate handling is ultimately managed by Policy Hub API"
+      shell: bash
