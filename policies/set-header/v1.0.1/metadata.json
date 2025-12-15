@@ -1,0 +1,19 @@
+{
+  "name": "set-header",
+  "displayName": "Set Header Policy",
+  "version": "1.0.0",
+  "provider": "Community",
+  "categories": ["transformations"],
+  "tags": ["header", "manipulation"],
+  "logoUrl": "assets/icon.svg",
+  "bannerUrl": "assets/banner.png",
+  "supportedPlatforms": ["apim-4.5+"],
+  "description": "Adds or modifies a header in the request.",
+  "documentation": {
+    "overview": "docs/overview.md",
+    "configuration": "docs/configuration.md",
+    "examples": "docs/examples.md",
+    "faq": "docs/faq.md",
+    "changelog": "docs/changelog.md"
+  }
+}
