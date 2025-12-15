@@ -81,15 +81,31 @@ jobs:
             fi
           fi
           
-          # Priority 2: Fallback to previous tag if no valid SHA and tags exist (for migration)
+          # Priority 2: Find the last successful release tag (one that has policies)
           if [ -z "$base_sha" ]; then
-            # Exclude the current release tag and get the previous one
-            previous_tag=$(git tag --sort=-version:refname | grep -v "^${current_tag}$" | head -1 || echo "")
-            if [ -n "$previous_tag" ] && git rev-parse --verify "$previous_tag" >/dev/null 2>&1; then
-              base_sha="$previous_tag"
-              echo "✅ Using previous release tag as fallback: $base_sha"
-            else
-              echo "ℹ️  No previous release tag found (this might be the first release)"
+            echo "🔍 Looking for last successful release tag..."
+            
+            # Get all tags sorted by version (newest first), excluding current tag
+            candidate_tags=$(git tag --sort=-version:refname | grep -v "^${current_tag}$" || echo "")
+            
+            for tag in $candidate_tags; do
+              tag_sha=$(git rev-parse "$tag" 2>/dev/null || echo "")
+              if [ -n "$tag_sha" ]; then
+                # Check if this tag has any policies by looking for policy directories created at this commit
+                policy_count=$(git diff --name-only --diff-filter=A "${tag_sha}^" "$tag_sha" 2>/dev/null | grep '^policies/' | wc -l || echo "0")
+                
+                if [ "$policy_count" -gt 0 ]; then
+                  base_sha="$tag_sha"
+                  echo "✅ Found successful release tag with $policy_count policy file(s): $tag ($tag_sha)"
+                  break
+                else
+                  echo "⚠️  Skipping tag $tag - no policies found (likely failed release)"
+                fi
+              fi
+            done
+            
+            if [ -z "$base_sha" ]; then
+              echo "ℹ️  No successful release tags found with policies"
             fi
           fi
           
@@ -235,7 +251,7 @@ jobs:
 
   update-success-sha:
     name: Update Success Tracking
-    needs: publish-policies
+    needs: [detect-versions, validate-policies]
     if: success()
     runs-on: ubuntu-latest
     timeout-minutes: 5
