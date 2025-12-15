@@ -1,0 +1,55 @@
+name: 'Verify Policy Hub Health'
+description: 'Verify that the Policy Hub API is reachable'
+
+inputs:
+  policy-hub-url:
+    description: 'Policy Hub API URL'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Verify Policy Hub API URL
+      run: |
+        set -euo pipefail
+        
+        url="${{ inputs.policy-hub-url }}"
+        health_endpoint="${url}/health"
+        
+        echo "🔗 Verifying Policy Hub API: $url"
+        
+        # Retry with exponential backoff
+        max_retries=3
+        retry_count=0
+        success=false
+        
+        while [ $retry_count -lt $max_retries ] && [ "$success" = false ]; do
+          echo "Attempt $((retry_count + 1))/$max_retries..."
+          
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -H "ngrok-skip-browser-warning: true" \
+            -H "User-Agent: GitHub-Actions-Policy-Hub" \
+            "$health_endpoint" 2>/dev/null || echo "000")
+          
+          if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+            success=true
+            echo "✅ Policy Hub is healthy (HTTP $http_code)"
+          else
+            echo "⚠️  Health check failed (HTTP $http_code)"
+            retry_count=$((retry_count + 1))
+            if [ $retry_count -lt $max_retries ]; then
+              sleep_time=$((2 ** retry_count))
+              echo "Retrying in ${sleep_time}s..."
+              sleep $sleep_time
+            fi
+          fi
+        done
+        
+        if [ "$success" = false ]; then
+          echo "❌ Policy Hub is unreachable after $max_retries attempts"
+          echo "Please check: $health_endpoint"
+          exit 1
+        fi
+      shell: bash

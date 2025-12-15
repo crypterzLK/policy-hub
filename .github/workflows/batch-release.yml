@@ -4,14 +4,39 @@ on:
   release:
     types: [published]
 
+concurrency:
+  group: release
+  cancel-in-progress: true
+
 env:
   S3_BUCKET: ${{ vars.S3_BUCKET_NAME }}
   POLICY_HUB_API_URL: ${{ vars.POLICY_HUB_API_URL }}
   AWS_REGION: ${{ vars.AWS_REGION }}
+  MAX_PARALLEL: ${{ vars.MAX_PARALLEL || 3 }}
 
 jobs:
-  detect-versions:
+  verify-health:
+    name: Verify Prerequisites
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github
+          sparse-checkout-cone-mode: false
+      
+      - name: Verify Policy Hub health
+        uses: ./.github/actions/verify-policy-hub-health
+        with:
+          policy-hub-url: ${{ vars.POLICY_HUB_API_URL }}
+
+  detect-versions:
+    name: Detect New Policy Versions
+    needs: verify-health
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       new-versions: ${{ steps.detect.outputs.new-versions }}
       new-versions-json: ${{ steps.format.outputs.json }}
@@ -26,29 +51,55 @@ jobs:
       - name: Get base SHA
         id: get_base
         run: |
-          current_tag="${{ github.event.release.tag_name }}"
+          set -euo pipefail  # Exit on error, undefined vars, pipe failures
           
+          current_tag="${{ github.event.release.tag_name }}"
           echo "Current release tag: $current_tag"
           
-          # Get all tags except the current one, sorted by version
-          all_tags=$(git tag --list --sort=-version:refname)
-          echo "All tags: $all_tags"
+          base_sha=""
           
-          # Filter out current tag to get previous tags
-          previous_tags=$(echo "$all_tags" | grep -v "^${current_tag}$" | head -5)
-          echo "Previous tags (excluding current): $previous_tags"
+          # Priority 1: Use last successful release SHA if file exists and is valid
+          if [ -f last-successful-release.sha ]; then
+            candidate_sha=$(cat last-successful-release.sha | tr -d '\n')
+            # Validate SHA and checksum if present
+            if git rev-parse --verify "$candidate_sha" >/dev/null 2>&1; then
+              # Check for checksum file to detect tampering
+              if [ -f last-successful-release.sha.sha256 ]; then
+                expected_checksum=$(cat last-successful-release.sha.sha256)
+                actual_checksum=$(echo "$candidate_sha" | sha256sum | awk '{print $1}')
+                if [ "$expected_checksum" != "$actual_checksum" ]; then
+                  echo "⚠️  Checksum mismatch for last-successful-release.sha, ignoring file"
+                  candidate_sha=""
+                fi
+              fi
+              if [ -n "$candidate_sha" ]; then
+                base_sha="$candidate_sha"
+                echo "✅ Using last successful release SHA: $base_sha"
+              fi
+            else
+              echo "⚠️  Invalid SHA in last-successful-release.sha ($candidate_sha), ignoring file"
+            fi
+          fi
           
-          # Get the most recent previous tag
-          last_tag=$(echo "$previous_tags" | head -1)
+          # Priority 2: Fallback to latest tag if no valid SHA and tags exist (for migration)
+          if [ -z "$base_sha" ]; then
+            latest_tag=$(git tag --sort=-version:refname | head -1 || echo "")
+            if [ -n "$latest_tag" ] && git rev-parse --verify "$latest_tag" >/dev/null 2>&1; then
+              base_sha="$latest_tag"
+              echo "✅ Using latest tag as fallback: $base_sha"
+            fi
+          fi
           
-          if [ -z "$last_tag" ]; then
-            # No previous tags found - this is the first release
+          # Priority 3: Initial commit if still no base
+          if [ -z "$base_sha" ]; then
             base_sha=$(git rev-list --max-parents=0 HEAD)
             echo "✅ First release detected, using initial commit: $base_sha"
-          else
-            # Use previous tag for subsequent releases
-            base_sha="$last_tag"
-            echo "✅ Using previous release tag: $base_sha"
+          fi
+          
+          # Final validation
+          if ! git rev-parse --verify "$base_sha" >/dev/null 2>&1; then
+            echo "❌ Final base SHA is invalid: $base_sha"
+            exit 1
           fi
           
           echo "base_sha=$base_sha" >> $GITHUB_OUTPUT
@@ -90,9 +141,11 @@ jobs:
           echo "count=$version_count" >> $GITHUB_OUTPUT
 
   validate-policies:
+    name: Validate Policies
     needs: detect-versions
     if: needs.detect-versions.outputs.version-count > 0
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -133,14 +186,17 @@ jobs:
           fi
 
   publish-policies:
+    name: Publish to Production
     needs: [detect-versions, validate-policies]
     if: needs.detect-versions.outputs.version-count > 0
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: production
     strategy:
+      fail-fast: false
       matrix:
         version-item: ${{ fromJSON(needs.detect-versions.outputs.new-versions-json) }}
-      max-parallel: 3
+      max-parallel: ${{ fromJSON(env.MAX_PARALLEL) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -172,3 +228,61 @@ jobs:
             echo "❌ Failed to publish ${{ matrix.version-item.policy }} ${{ matrix.version-item.version }}"
             exit 1
           fi
+
+  update-success-sha:
+    name: Update Success Tracking
+    needs: publish-policies
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update last successful release SHA
+        run: |
+          set -euo pipefail
+          
+          current_sha="${{ github.sha }}"
+          file="last-successful-release.sha"
+          
+          # Check if update is needed
+          if [ -f "$file" ] && [ "$(cat $file | tr -d '\n')" = "$current_sha" ]; then
+            echo "ℹ️  SHA file already up-to-date, skipping update"
+            exit 0
+          fi
+          
+          # Update the file
+          echo "$current_sha" > "$file"
+          # Generate checksum for integrity
+          echo "$current_sha" | sha256sum | awk '{print $1}' > "${file}.sha256"
+          
+          # Configure Git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Add and commit
+          git add "$file" "${file}.sha256"
+          git commit -m "chore: update last successful release SHA to $current_sha"
+          
+          # Push with retry
+          max_retries=3
+          retry_count=0
+          while [ $retry_count -lt $max_retries ]; do
+            if git push origin HEAD; then
+              echo "✅ Successfully updated last successful release SHA"
+              exit 0
+            else
+              retry_count=$((retry_count + 1))
+              echo "⚠️  Push failed (attempt $retry_count/$max_retries), retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
+          echo "❌ Failed to push SHA update after $max_retries attempts"
+          exit 1
+        shell: bash

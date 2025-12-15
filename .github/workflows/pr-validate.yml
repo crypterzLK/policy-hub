@@ -5,6 +5,10 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - 'policies/**'
+      - 'scripts/**'
+      - 'config/**'
+      - '.github/workflows/pr-validate.yml'
+      - '.github/actions/**'
 
 jobs:
   validate:

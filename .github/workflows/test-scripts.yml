@@ -5,11 +5,15 @@ on:
     branches: [ main, develop ]
     paths:
       - 'scripts/**'
+      - 'config/**'
       - '.github/workflows/test-scripts.yml'
+      - '.github/actions/**'
   pull_request:
     paths:
       - 'scripts/**'
+      - 'config/**'
       - '.github/workflows/test-scripts.yml'
+      - '.github/actions/**'
 
 jobs:
   test-prepare-zip:

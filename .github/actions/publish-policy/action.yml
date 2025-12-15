@@ -97,10 +97,32 @@ runs:
 
         # Read metadata
         if [ -f "$policy_dir/metadata.json" ]; then
-          metadata=$(cat "$policy_dir/metadata.json")
+          display_name=$(jq -r '.displayName // "Unknown"' "$policy_dir/metadata.json")
+          provider=$(jq -r '.provider // "Unknown"' "$policy_dir/metadata.json")
+          description=$(jq -r '.description // ""' "$policy_dir/metadata.json")
+          categories=$(jq -r '.categories // [] | map("\"" + . + "\"") | join(",")' "$policy_dir/metadata.json")
+          tags=$(jq -r '.tags // [] | map("\"" + . + "\"") | join(",")' "$policy_dir/metadata.json")
+          supported_platforms=$(jq -r '.supportedPlatforms // [] | map("\"" + . + "\"") | join(",")' "$policy_dir/metadata.json")
+          logo_url=$(jq -r '.logoUrl // ""' "$policy_dir/metadata.json")
+          banner_url=$(jq -r '.bannerUrl // ""' "$policy_dir/metadata.json")
+          
+          # Convert GitHub URLs to raw if needed
+          if [[ "$logo_url" =~ ^https://github\.com/ ]]; then
+            logo_url=$(echo "$logo_url" | sed 's|https://github.com/|https://raw.githubusercontent.com/|' | sed 's|/blob/|/|')
+          fi
+          if [[ "$banner_url" =~ ^https://github\.com/ ]]; then
+            banner_url=$(echo "$banner_url" | sed 's|https://github.com/|https://raw.githubusercontent.com/|' | sed 's|/blob/|/|')
+          fi
         else
-          echo "⚠️  metadata.json not found, using empty object"
-          metadata="{}"
+          echo "⚠️  metadata.json not found, using defaults"
+          display_name="Unknown"
+          provider="Unknown"
+          description=""
+          categories=""
+          tags=""
+          supported_platforms=""
+          logo_url=""
+          banner_url=""
         fi
 
         # Read source type from config or use input
@@ -124,9 +146,8 @@ runs:
         if [[ "$source_type" == "s3" ]]; then
           source_url="https://${{ inputs.s3-bucket }}.s3.${{ env.AWS_REGION || 'us-east-1' }}.amazonaws.com/policies/${{ inputs.policy }}-${{ inputs.version }}.zip"
         else
-          # GitHub raw repository URL for direct file access
+          # GitHub raw URL for the policy directory
           source_url="https://raw.githubusercontent.com/$repo_path/main/policies/${{ inputs.policy }}/${{ inputs.version }}"
-          source_type="github"
         fi
 
         # Always use GitHub raw URLs for policy resources (definition, docs, assets)
@@ -135,7 +156,7 @@ runs:
         docs_base_url="$base_url/docs/"
         assets_base_url="$base_url/assets/"
 
-        # Construct API payload
+        # Construct API payload matching the expected structure
         payload=$(cat <<EOF
         {
           "policyName": "${{ inputs.policy }}",
@@ -143,8 +164,21 @@ runs:
           "sourceType": "$source_type",
           "sourceUrl": "$source_url",
           "definitionUrl": "$definition_url",
-          "metadata": $metadata,
-          "docsBaseUrl": "$docs_base_url",
+          "metadata": {
+            "displayName": "$display_name",
+            "provider": "$provider",
+            "description": "$description",
+            "categories": [$categories],
+            "tags": [$tags],
+            "supportedPlatforms": [$supported_platforms],
+            "logoUrl": "$logo_url",
+            "bannerUrl": "$banner_url"
+          },
+          "documentation": {
+            "configuration": "$docs_base_url/configuration.md",
+            "examples": "$docs_base_url/examples.md",
+            "overview": "$docs_base_url/overview.md"
+          },
           "assetsBaseUrl": "$assets_base_url"
         }
         EOF
@@ -154,41 +188,63 @@ runs:
         echo "🔗 Syncing with Policy Hub: $sync_url"
         echo "📝 Payload: $payload"
         
-        response=$(curl -X POST "$sync_url" \
-          -H "Authorization: Bearer $POLICY_HUB_API_KEY" \
-          -H "Content-Type: application/json" \
-          -H "ngrok-skip-browser-warning: true" \
-          -d "$payload" \
-          --max-time 30 \
-          -w "HTTP_CODE:%{http_code}" \
-          -s)
+        # Make API call with retry logic
+        max_retries=3
+        retry_count=0
+        success=false
         
-        http_code=$(echo "$response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
-        response_body=$(echo "$response" | sed 's/HTTP_CODE:[0-9]*$//')
-        
-        if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-          # Parse JSON response to check success field
-          api_success=$(echo "$response_body" | jq -r '.success // false' 2>/dev/null || echo "false")
+        while [ $retry_count -lt $max_retries ] && [ "$success" = false ]; do
+          echo "Attempting sync (attempt $((retry_count + 1))/$max_retries)..."
           
-          if [[ "$api_success" == "true" ]]; then
-            policy_name=$(echo "$response_body" | jq -r '.data.policyName // "unknown"' 2>/dev/null)
-            version=$(echo "$response_body" | jq -r '.data.version // "unknown"' 2>/dev/null)
-            status=$(echo "$response_body" | jq -r '.data.status // "unknown"' 2>/dev/null)
-            trace_id=$(echo "$response_body" | jq -r '.meta.trace_id // "none"' 2>/dev/null)
-            
-            echo "✅ Synced with Policy Hub (HTTP $http_code)"
-            echo "📊 Policy: $policy_name $version, Status: $status, Trace: $trace_id"
-            echo "success=true" >> $GITHUB_OUTPUT
+          response=$(curl -X POST "$sync_url" \
+            -H "Authorization: Bearer $POLICY_HUB_API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: GitHub-Actions-Policy-Publish" \
+            -H "ngrok-skip-browser-warning: true" \
+            -d "$payload" \
+            --max-time 30 \
+            --connect-timeout 10 \
+            --retry 0 \
+            -w "HTTP_CODE:%{http_code}" \
+            -s)
+          
+          http_code=$(echo "$response" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
+          response_body=$(echo "$response" | sed 's/HTTP_CODE:[0-9]*$//')
+          
+          if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+            api_success=$(echo "$response_body" | jq -r '.success // false' 2>/dev/null || echo "false")
+            if [[ "$api_success" == "true" ]]; then
+              success=true
+              echo "✅ Synced successfully on attempt $((retry_count + 1))"
+            else
+              echo "❌ API returned success=false on attempt $((retry_count + 1))"
+            fi
           else
-            error_msg=$(echo "$response_body" | jq -r '.error // "Unknown error"' 2>/dev/null)
-            echo "❌ Policy Hub sync failed - API returned success=false"
-            echo "Error: $error_msg"
-            echo "Response: $response_body"
-            echo "success=false" >> $GITHUB_OUTPUT
+            echo "❌ HTTP $http_code on attempt $((retry_count + 1))"
           fi
+          
+          if [ "$success" = false ]; then
+            retry_count=$((retry_count + 1))
+            if [ $retry_count -lt $max_retries ]; then
+              echo "Retrying in 5 seconds..."
+              sleep 5
+            fi
+          fi
+        done
+        
+        if [ "$success" = true ]; then
+          policy_name=$(echo "$response_body" | jq -r '.data.policyName // "unknown"' 2>/dev/null)
+          version=$(echo "$response_body" | jq -r '.data.version // "unknown"' 2>/dev/null)
+          status=$(echo "$response_body" | jq -r '.data.status // "unknown"' 2>/dev/null)
+          trace_id=$(echo "$response_body" | jq -r '.meta.trace_id // "none"' 2>/dev/null)
+          
+          echo "📊 Policy: $policy_name $version, Status: $status, Trace: $trace_id"
+          echo "success=true" >> $GITHUB_OUTPUT
         else
-          echo "❌ Policy Hub sync failed (HTTP $http_code)"
-          echo "Response: $response_body"
+          error_msg=$(echo "$response_body" | jq -r '.error // "Unknown error"' 2>/dev/null)
+          echo "❌ Sync failed after $max_retries attempts"
+          echo "Final error: $error_msg"
+          echo "Final response: $response_body"
           echo "success=false" >> $GITHUB_OUTPUT
         fi
       shell: bash
