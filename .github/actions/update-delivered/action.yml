@@ -1,0 +1,112 @@
+name: 'Update Delivered State'
+description: 'Update .state/delivered.json in main branch to mark a policy version as delivered'
+
+inputs:
+  policy:
+    description: 'Policy name (e.g., rate-limiter)'
+    required: true
+  version:
+    description: 'Version string (e.g., v1.0.0)'
+    required: true
+  commit:
+    description: 'Commit SHA representing the delivered content'
+    required: true
+  token:
+    description: 'GitHub token used to push the update (usually GITHUB_TOKEN)'
+    required: true
+  repo:
+    description: 'Repository full name (owner/repo)'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Prepare repo and fetch main
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+
+        # Use token-authenticated remote for pushing
+        git remote set-url origin "https://x-access-token:${{ inputs.token }}@github.com/${{ inputs.repo }}"
+
+        # Fetch main branch
+        git fetch origin main:refs/remotes/origin/main || true
+
+        # Start from latest main
+        git checkout -B update-delivered origin/main || git checkout -B update-delivered
+
+    - name: Ensure delivered.json exists
+      shell: bash
+      run: |
+        set -euo pipefail
+        if git show origin/main:.state/delivered.json > /tmp/delivered.json 2>/dev/null; then
+          echo "✅ Loaded existing delivered.json"
+        else
+          echo "{}" > /tmp/delivered.json
+          echo "ℹ️  No existing delivered.json found; starting fresh"
+        fi
+        mkdir -p .state
+        cp /tmp/delivered.json .state/delivered.json
+
+    - name: Update delivered.json
+      shell: bash
+      run: |
+        set -euo pipefail
+        policy="${{ inputs.policy }}"
+        version="${{ inputs.version }}"
+        commit_sha="${{ inputs.commit }}"
+        file=".state/delivered.json"
+
+        python3 - <<PY
+import json
+path='''$file'''
+try:
+    with open(path,'r') as f:
+        d=json.load(f)
+except Exception:
+    d={}
+key=f"policies/{policy}/{version}"
+d[key]=commit_sha
+with open(path,'w') as f:
+    json.dump(d,f,indent=2,sort_keys=True)
+print('✅ Updated', key, '=>', commit_sha)
+PY
+
+    - name: Commit and push with retry
+      shell: bash
+      run: |
+        set -euo pipefail
+        policy="${{ inputs.policy }}"
+        version="${{ inputs.version }}"
+        file=".state/delivered.json"
+
+        git add "$file"
+        if git diff --staged --quiet; then
+          echo "ℹ️  No changes to commit"
+          exit 0
+        fi
+
+        git commit -m "chore: mark delivered policies/${policy}/${version}"
+
+        max_retries=5
+        try=0
+        until [ $try -ge $max_retries ]; do
+          if git push origin HEAD:main 2>/tmp/push.log; then
+            echo "✅ Pushed delivered.json to main"
+            exit 0
+          else
+            echo "⚠️  Push failed (attempt $((try+1))/$max_retries)"
+            tail -n +1 /tmp/push.log || true
+            try=$((try+1))
+            echo "🔁 Fetching remote and rebasing local changes..."
+            git fetch origin main:refs/remotes/origin/main || true
+            git rebase origin/main || git rebase --abort || true
+            sleep 2
+          fi
+        done
+
+        echo "❌ Failed to push after $max_retries attempts"
+        exit 1

@@ -1,86 +1,438 @@
-name: Release Delivery
+name: Batch Release
 
 on:
   release:
     types: [published]
 
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+env:
+  S3_BUCKET: ${{ vars.S3_BUCKET_NAME }}
+  POLICY_HUB_API_URL: ${{ vars.POLICY_HUB_API_URL }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  MAX_PARALLEL: ${{ vars.MAX_PARALLEL || 3 }}
+
 jobs:
-  setup-state:
+  detect-versions:
+    name: Detect New Policy Versions
     runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-    - name: Setup state
-      run: |
-        mkdir -p .state
-        if [ ! -f .state/baseline.sha ]; then
-          git rev-list --max-parents=0 HEAD > .state/baseline.sha
-        fi
-        if [ ! -f .state/delivered.json ]; then
-          echo '{}' > .state/delivered.json
-        fi
-    - name: Commit initial state
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add .state/
-        git commit -m "Initialize delivery state" || true
-        git push origin HEAD:main || true
-
-  detect-folders:
-    needs: setup-state
-    runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
-      folders: ${{ steps.detect.outputs.folders }}
+      new-versions: ${{ steps.detect.outputs.new-versions }}
+      new-versions-json: ${{ steps.format.outputs.json }}
+      version-count: ${{ steps.count.outputs.count }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Detect changed folders
-      id: detect
-      run: |
-        baseline=$(cat .state/baseline.sha)
-        folders=$(git diff --name-only $baseline..HEAD | awk -F'/' '{print $1"/"$2"/"$3}' | sort -u | jq -R -s -c 'split("\n")[:-1]')
-        echo "folders=$folders" >> $GITHUB_OUTPUT
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.target_commitish }}
 
-  deliver:
-    needs: detect-folders
+      - name: Get success tracking from main branch
+        id: get_tracking
+        run: |
+          set +e  # Don't exit on error for this step
+          
+          # Determine default branch (try main, then master)
+          default_branch="main"
+          if ! git ls-remote --heads origin main | grep -q main; then
+            if git ls-remote --heads origin master | grep -q master; then
+              default_branch="master"
+              echo "ℹ️  Using 'master' branch (main not found)"
+            else
+              echo "⚠️  Neither 'main' nor 'master' branch found"
+              echo "has_tracking=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          
+          # Fetch latest from default branch to get the tracking file
+          if ! git fetch origin "${default_branch}:refs/remotes/origin/${default_branch}" 2>/dev/null; then
+            echo "⚠️  Failed to fetch ${default_branch} branch"
+            echo "has_tracking=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Try to get the file from default branch
+          if git show "origin/${default_branch}:last-successful-release.sha" > /tmp/last-successful-release.sha 2>/dev/null; then
+            echo "✅ Found tracking file on ${default_branch} branch"
+            echo "has_tracking=true" >> $GITHUB_OUTPUT
+            
+            # Also get checksum if exists
+            if git show "origin/${default_branch}:last-successful-release.sha.sha256" > /tmp/last-successful-release.sha.sha256 2>/dev/null; then
+              echo "✅ Found tracking checksum"
+            fi
+          else
+            echo "ℹ️  No tracking file on ${default_branch} branch"
+            echo "has_tracking=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Get base SHA
+        id: get_base
+        run: |
+          set -euo pipefail  # Exit on error, undefined vars, pipe failures
+          
+          current_tag="${{ github.event.release.tag_name }}"
+          echo "Current release tag: $current_tag"
+          
+          base_sha=""
+          
+          # Priority 1: Use last successful release SHA from main branch
+          if [ "${{ steps.get_tracking.outputs.has_tracking }}" = "true" ] && [ -f /tmp/last-successful-release.sha ]; then
+            candidate_sha=$(cat /tmp/last-successful-release.sha | tr -d '\n')
+            echo "📋 Found tracking SHA from main branch: $candidate_sha"
+            
+            # Validate SHA
+            if git rev-parse --verify "$candidate_sha" >/dev/null 2>&1; then
+              # Check checksum if present
+              if [ -f /tmp/last-successful-release.sha.sha256 ]; then
+                expected_checksum=$(cat /tmp/last-successful-release.sha.sha256 | tr -d '\n')
+                actual_checksum=$(echo "$candidate_sha" | sha256sum | awk '{print $1}')
+                if [ "$expected_checksum" != "$actual_checksum" ]; then
+                  echo "⚠️  Checksum mismatch, ignoring tracking file"
+                else
+                  base_sha="$candidate_sha"
+                  echo "✅ Using last successful release SHA from main branch: $base_sha"
+                fi
+              else
+                base_sha="$candidate_sha"
+                echo "✅ Using last successful release SHA from main branch: $base_sha (no checksum)"
+              fi
+            else
+              echo "⚠️  Invalid SHA in tracking file: $candidate_sha"
+            fi
+          else
+            echo "ℹ️  No tracking file found on main branch, will use fallback detection"
+          fi
+          
+          # Priority 2: Find last tag with policies (FALLBACK - may include failed releases)
+          if [ -z "$base_sha" ]; then
+            echo "🔍 Falling back to tag-based detection (WARNING: less reliable)..."
+            echo "⚠️  This fallback may include releases where publishing failed"
+            
+            # Get all tags sorted by version (newest first), excluding current tag
+            candidate_tags=$(git tag --sort=-version:refname | grep -v "^${current_tag}$" || echo "")
+            
+            for tag in $candidate_tags; do
+              tag_sha=$(git rev-parse "$tag" 2>/dev/null || echo "")
+              if [ -n "$tag_sha" ]; then
+                # Check if this tag has any policies by looking for policy directories created at this commit
+                policy_count=$(git diff --name-only --diff-filter=A "${tag_sha}^" "$tag_sha" 2>/dev/null | grep '^policies/' | wc -l || echo "0")
+                
+                if [ "$policy_count" -gt 0 ]; then
+                  base_sha="$tag_sha"
+                  echo "⚠️  Using tag with policies as fallback: $tag ($tag_sha)"
+                  echo "⚠️  Note: This tag may have had publishing failures"
+                  echo "⚠️  Recommend: Ensure tracking file exists on main branch for accurate detection"
+                  break
+                fi
+              fi
+            done
+            
+            if [ -z "$base_sha" ]; then
+              echo "ℹ️  No tags with policies found"
+            fi
+          fi
+          
+          # Priority 3: Initial commit if still no base
+          if [ -z "$base_sha" ]; then
+            base_sha=$(git rev-list --max-parents=0 HEAD | head -1)
+            echo "✅ First release detected, using initial commit: $base_sha"
+            echo "ℹ️  Note: If this is not the first release, tracking file is missing - consider manual recovery"
+          fi
+          
+          # Final validation
+          if ! git rev-parse --verify "$base_sha" >/dev/null 2>&1; then
+            echo "❌ Final base SHA is invalid: $base_sha"
+            exit 1
+          fi
+          
+          echo "base_sha=$base_sha" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Detect new policy versions
+        id: detect
+        uses: ./.github/actions/detect-versions
+        with:
+          base-sha: ${{ steps.get_base.outputs.base_sha }}
+          head-sha: ${{ github.sha }}
+
+      - name: Format versions for matrix
+        id: format
+        run: |
+          versions="${{ steps.detect.outputs.new-versions }}"
+          json_array="[]"
+          if [ -n "$versions" ]; then
+            # Load delivered.json from origin/main if available (fetched earlier)
+            if git show origin/main:.state/delivered.json > /tmp/delivered.json 2>/dev/null; then
+              echo "✅ Loaded delivered.json from origin/main"
+            else
+              echo "{}" > /tmp/delivered.json
+            fi
+
+            json_array="["
+            first=true
+            for version_path in $versions; do
+              policy=$(echo $version_path | cut -d'/' -f1)
+              version=$(echo $version_path | cut -d'/' -f2)
+
+              # Determine latest commit affecting this folder
+              commit=$(git log -n1 --format=%H -- "policies/$policy/$version" 2>/dev/null || echo "")
+
+              # Check delivered.json to decide whether to skip
+              delivered_commit=$(python3 - <<PY
+import json,sys
+try:
+    d=json.load(open('/tmp/delivered.json'))
+except Exception:
+    d={}
+print(d.get(f"policies/{policy}/{version}",""))
+PY
+"$policy" "$version")
+
+              if [ -n "$delivered_commit" ] && [ "$delivered_commit" = "$commit" ]; then
+                echo "🔁 Skipping already-delivered $policy/$version at $commit"
+                continue
+              fi
+
+              if [ "$first" = true ]; then
+                first=false
+              else
+                json_array+="," 
+              fi
+              json_array+="{\"policy\":\"$policy\",\"version\":\"$version\",\"commit\":\"$commit\"}"
+            done
+            json_array+="]"
+          fi
+          echo "json=$json_array" >> $GITHUB_OUTPUT
+
+      - name: Count versions
+        id: count
+        run: |
+          # Count number of entries in the formatted JSON array
+          json="${{ steps.format.outputs.json }}"
+          if [ -z "$json" ] || [ "$json" = "[]" ]; then
+            echo "count=0" >> $GITHUB_OUTPUT
+          else
+            version_count=$(python3 - <<PY
+import sys,json
+s=sys.stdin.read()
+try:
+  arr=json.loads(s)
+  print(len(arr))
+except Exception:
+  print(0)
+PY
+"$json")
+            echo "count=$version_count" >> $GITHUB_OUTPUT
+          fi
+
+  validate-and-check:
+    name: Validate & Check Policy
+    needs: detect-versions
+    if: needs.detect-versions.outputs.version-count > 0
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
-      matrix:
-        folder: ${{ fromJson(needs.detect-folders.outputs.folders) }}
       fail-fast: false
+      matrix:
+        version-item: ${{ fromJSON(needs.detect-versions.outputs.new-versions-json) }}
+      max-parallel: ${{ vars.MAX_PARALLEL || 3 }}
     steps:
-    - uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-    - name: Check eligibility
-      id: check
-      run: |
-        folder="${{ matrix.folder }}"
-        latest_sha=$(git log -1 --format=%H -- $folder)
-        delivered_sha=$(jq -r ".\"$folder\" // empty" .state/delivered.json)
-        if [ "$latest_sha" != "$delivered_sha" ]; then
-          echo "deliver=true" >> $GITHUB_OUTPUT
-        else
-          echo "deliver=false" >> $GITHUB_OUTPUT
-        fi
-    - name: Deliver folder
-      if: steps.check.outputs.deliver == 'true'
-      run: |
-        folder="${{ matrix.folder }}"
-        latest_sha=$(git log -1 --format=%H -- $folder)
-        # API call to Policy Hub
-        curl -X POST ${{ vars.POLICY_HUB_API_URL }}/sync \
-          -H "Content-Type: application/json" \
-          -d "{\"folder\": \"$folder\", \"commit\": \"$latest_sha\"}"
-    - name: Update state on success
-      if: steps.check.outputs.deliver == 'true' && success()
-      run: |
-        folder="${{ matrix.folder }}"
-        latest_sha=$(git log -1 --format=%H -- $folder)
-        jq ".\"$folder\" = \"$latest_sha\"" .state/delivered.json > .state/delivered.json.tmp && mv .state/delivered.json.tmp .state/delivered.json
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add .state/delivered.json
-        git commit -m "Update delivery state for ${{ matrix.folder }}" || true
-        git push origin HEAD:main || true
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate policy structure and metadata
+        run: |
+          echo "🔍 Validating ${{ matrix.version-item.policy }}/${{ matrix.version-item.version }}..."
+          
+          # Make validation script executable
+          chmod +x scripts/validate-policy.sh
+          
+          if ./scripts/validate-policy.sh "${{ matrix.version-item.policy }}" "${{ matrix.version-item.version }}" 2>&1; then
+            echo "✅ Validation passed for ${{ matrix.version-item.policy }}/${{ matrix.version-item.version }}"
+          else
+            echo "❌ Validation failed for ${{ matrix.version-item.policy }}/${{ matrix.version-item.version }}"
+            exit 1
+          fi
+
+      - name: Check if policy already exists in Policy Hub
+        run: |
+          echo "🔍 Checking if ${{ matrix.version-item.policy }}/${{ matrix.version-item.version }} exists in Policy Hub..."
+          
+          check_url="${{ vars.POLICY_HUB_API_URL }}/policies/${{ matrix.version-item.policy }}/versions/${{ matrix.version-item.version }}"
+          
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "ngrok-skip-browser-warning: true" \
+            -H "User-Agent: GitHub-Actions-Policy-Check" \
+            --max-time 10 \
+            --connect-timeout 5 \
+            "$check_url" 2>/dev/null || echo "000")
+          
+          if [ "$response" = "200" ]; then
+            echo "⚠️  Policy already exists in Policy Hub"
+            echo "⚠️  Will proceed - Policy Hub API will handle duplicates"
+          elif [ "$response" = "404" ]; then
+            echo "✅ Policy does not exist - ready for publishing"
+          else
+            echo "⚠️  Could not verify existence (HTTP $response)"
+            echo "⚠️  Will proceed with publishing"
+          fi
+
+  publish-policies:
+    name: Publish to Production
+    needs: [detect-versions, validate-and-check]
+    if: needs.detect-versions.outputs.version-count > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        version-item: ${{ fromJSON(needs.detect-versions.outputs.new-versions-json) }}
+      max-parallel: ${{ vars.MAX_PARALLEL || 3 }}
+    outputs:
+      job-status: ${{ steps.final-status.outputs.status }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Publish policy version
+        id: publish
+        uses: ./.github/actions/publish-policy
+        with:
+          policy: ${{ matrix.version-item.policy }}
+          version: ${{ matrix.version-item.version }}
+          release-tag: ${{ github.event.release.tag_name }}
+          s3-bucket: ${{ vars.S3_BUCKET_NAME }}
+          policy-hub-url: ${{ vars.POLICY_HUB_API_URL }}
+          repo-url: ${{ github.server_url }}/${{ github.repository }}
+          policy-hub-api-key: ${{ secrets.POLICY_HUB_API_KEY }}
+
+      - name: Report result
+        if: always()
+        run: |
+          if [[ "${{ steps.publish.outputs.success }}" == "true" ]]; then
+            echo "✅ Successfully published ${{ matrix.version-item.policy }} ${{ matrix.version-item.version }}"
+          else
+            echo "❌ Failed to publish ${{ matrix.version-item.policy }} ${{ matrix.version-item.version }}"
+            echo "⚠️  This failure will be tracked - failed policies will be retried in next release"
+            exit 1
+          fi
+
+      - name: Update delivered state
+        if: ${{ steps.publish.outputs.success == 'true' }}
+        uses: ./.github/actions/update-delivered
+        with:
+          policy: ${{ matrix.version-item.policy }}
+          version: ${{ matrix.version-item.version }}
+          commit: ${{ matrix.version-item.commit }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repo: ${{ github.repository }}
+      
+      - name: Set final status
+        id: final-status
+        if: always()
+        run: |
+          if [[ "${{ steps.publish.outputs.success }}" == "true" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
+
+  check-publish-results:
+    name: Check Publishing Results
+    needs: [detect-versions, publish-policies]
+    if: always() && needs.detect-versions.outputs.version-count > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      all-succeeded: ${{ steps.check.outputs.all_succeeded }}
+    steps:
+      - name: Check if all policies published successfully
+        id: check
+        run: |
+          # Note: With continue-on-error, we need to check job conclusion
+          # If any matrix job failed, the overall job shows as success but with failures
+          publish_result="${{ needs.publish-policies.result }}"
+          
+          if [[ "$publish_result" == "success" ]]; then
+            echo "all_succeeded=true" >> $GITHUB_OUTPUT
+            echo "✅ All policies published successfully"
+          else
+            echo "all_succeeded=false" >> $GITHUB_OUTPUT
+            echo "❌ Some policies failed to publish"
+            echo "⚠️  Failed policies will be retried in next release"
+          fi
+
+  update-success-sha:
+    name: Update Success Tracking
+    needs: [detect-versions, validate-and-check, publish-policies, check-publish-results]
+    if: always() && (needs.detect-versions.result == 'success') && (needs.validate-and-check.result == 'success' || needs.validate-and-check.result == 'skipped') && (needs.check-publish-results.outputs.all-succeeded == 'true' || needs.publish-policies.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update last successful release SHA
+        run: |
+          set -euo pipefail
+          
+          current_sha="${{ github.sha }}"
+          file="last-successful-release.sha"
+          
+          # Check if update is needed
+          if [ -f "$file" ] && [ "$(cat $file | tr -d '\n')" = "$current_sha" ]; then
+            echo "ℹ️  SHA file already up-to-date, skipping update"
+            exit 0
+          fi
+          
+          # Update the file
+          echo "$current_sha" > "$file"
+          # Generate checksum for integrity
+          echo "$current_sha" | sha256sum | awk '{print $1}' > "${file}.sha256"
+          
+          # Configure Git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Add and commit
+          git add "$file" "${file}.sha256"
+          git commit -m "chore: update last successful release SHA to $current_sha"
+          
+          # Push with retry
+          max_retries=3
+          retry_count=0
+          while [ $retry_count -lt $max_retries ]; do
+            if git push origin HEAD:main 2>&1; then
+              echo "✅ Successfully updated last successful release SHA"
+              exit 0
+            else
+              retry_count=$((retry_count + 1))
+              echo "⚠️  Push failed (attempt $retry_count/$max_retries), retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
+          echo "❌ Failed to push SHA update after $max_retries attempts"
+          echo "⚠️  WARNING: Release was successful but tracking file not updated"
+          echo "⚠️  Next release may re-process some policies"
+          echo "⚠️  Recommend: Manually commit tracking file or investigate git push failure"
+          exit 1
+        shell: bash
