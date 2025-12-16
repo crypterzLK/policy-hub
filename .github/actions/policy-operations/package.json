@@ -1,0 +1,16 @@
+{
+  "name": "policy-operations",
+  "version": "1.0.0",
+  "description": "Combined GitHub Action for all policy operations",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["github-action", "policy", "operations"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/exec": "^1.1.1"
+  }
+}

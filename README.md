@@ -1,112 +1,335 @@
 # Policy Hub Repository
 
-Batch publishing of policy versions via GitHub releases with robust error handling, parallel processing, and comprehensive validation.
+**Reliable, idempotent, and failure-safe policy delivery system** triggered by GitHub Releases. Built with JavaScript actions and folder-level state management for granular reliability.
 
-## Features
+## ✨ Features
 
-- 🚀 **Parallel Processing**: Publish multiple policy versions concurrently (up to 3 parallel jobs)
-- 🛡️ **Robust Error Handling**: Individual version failures don't stop batch processing
-- 🔍 **Smart Version Detection**: Git-based detection of new policy versions
-- 📦 **Automated Packaging**: ZIP creation with validation and integrity checks
-- ☁️ **Cloud Storage**: S3 integration for artifact storage
-- 🔗 **API Integration**: Seamless sync with Policy Hub API
-- ✅ **Comprehensive Testing**: Automated testing for scripts and workflows
-- 📋 **PR Validation**: Automated validation of policy structure in pull requests
+- 🎯 **Folder-Level Reliability**: Per-policy tracking and retry
+- 🔄 **Idempotent Delivery**: Safe to run multiple times, no duplicates
+- 🚀 **Parallel Processing**: Concurrent validation and publishing (configurable)
+- 🛡️ **Failure-Safe**: Failed policies auto-retry on next release
+- 💾 **State Management**: Git-tracked baseline and delivery state
+- 🔍 **Smart Detection**: Changed policies since baseline commit
+- ✅ **Comprehensive Validation**: Structure, metadata, and documentation checks
+- 📊 **Rich Observability**: Detailed summaries and progress tracking
+- 🔐 **API Idempotency**: Commit SHA-based deduplication
+
+## 🏗️ Architecture
+
+This system implements the **reliable folder-based delivery pattern**:
+
+1. **Baseline Tracking**: `.state/baseline.sha` tracks the starting point
+2. **Delivery State**: `.state/delivered.json` records successful deliveries per folder
+3. **Change Detection**: Git diff identifies changed policies since baseline
+4. **Eligibility Check**: Compares current SHA with delivered SHA
+5. **Idempotent Publishing**: Commit SHA ensures no duplicate deliveries
+6. **State Update**: Success recorded in delivered.json for future runs
+
+See [Architecture Documentation](./ARCHITECTURE.md) for complete details.
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- GitHub repository with policies in `policies/<name>/v<version>/` format
+- Policy Hub API endpoint
+- API authentication key
+
+### Initial Setup
+
+1. **Configure Repository Variables** (Settings → Secrets and variables → Actions)
+
+2. **Initialize State** (automatically done on first release)
+
+3. **Create a Release** to trigger the workflow
 
 ## Required Secrets and Variables
 
-### Secrets (Encrypted - for sensitive data)
+### Repository Secrets
 
-| Secret | Description | Example |
-|--------|-------------|---------|
-| `AWS_ACCESS_KEY_ID` | AWS access key for S3 operations | `AKIAIOSFODNN7EXAMPLE` |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 operations | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` |
-| `POLICY_HUB_API_KEY` | API key for Policy Hub authentication | `ph_1234567890abcdef` |
+| Secret | Description | Required |
+|--------|-------------|----------|
+| `POLICY_HUB_API_KEY` | API key for Policy Hub authentication | ✅ Yes |
+| `GITHUB_TOKEN` | Automatically provided by GitHub Actions | ✅ Auto |
 
-### Variables (Plain text - for configuration)
+### Repository Variables
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `AWS_REGION` | AWS region for S3 bucket | `us-east-1` |
-| `S3_BUCKET_NAME` | S3 bucket for storing policy artifacts | `my-policy-artifacts` |
-| `POLICY_HUB_API_URL` | Policy Hub API base URL | `https://api.policyhub.com` |
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `POLICY_HUB_API_URL` | Policy Hub API base URL | - | ✅ Yes |
+| `MAX_PARALLEL` | Maximum parallel jobs | `3` | ❌ Optional |
+| `AWS_REGION` | AWS region (if using AWS features) | - | ❌ Optional |
 
-## Repository Structure
+## 📂 Repository Structure
 
 ```
 .
+├── .state/                          # State management (Git-tracked)
+│   ├── baseline.sha                 # Baseline commit for change detection
+│   ├── delivered.json               # Per-folder delivery tracking
+│   └── README.md                    # State documentation
 ├── .github/
-│   ├── actions/
-│   │   ├── publish-policy/          # Composite action for publishing
-│   │   └── detect-versions/         # Composite action for version detection
+│   ├── actions/                     # JavaScript actions (Node.js 20)
+│   │   ├── detect-changed-policies/ # Detects changed policy folders
+│   │   ├── validate-policy/         # Validates policy structure
+│   │   ├── check-delivery-status/   # Checks if already delivered
+│   │   ├── publish-policy/          # Publishes to Policy Hub API
+│   │   └── update-delivery-state/   # Updates delivery state
 │   └── workflows/
-│       ├── batch-release.yml        # Main publishing workflow
-│       ├── pr-validate.yml          # PR validation workflow
-│       └── test-scripts.yml         # Script testing workflow
+│       └── batch-release.yml        # Main release workflow
+├── policies/                        # Policy folders
+│   └── <policy-name>/
+│       └── v<version>/
+│           ├── metadata.json
+│           ├── policy-definition.yaml
+│           ├── docs/
+│           └── src/
 ├── config/
 │   └── policy-hub-config.json       # Configuration file
-├── scripts/
-│   ├── prepare-zip.sh               # ZIP preparation script
-│   └── validate-config.sh           # Configuration validation script
-├── policies/                        # Policy definitions (created by users)
-│   └── <policy-name>/
-│       └── <version>/
-│           ├── src/                 # Go source code
-│           ├── docs/                # Documentation
-│           ├── metadata.json        # Policy metadata
-│           └── policy-definition.yaml # Policy definition
-└── README.md
+├── ARCHITECTURE.md                  # Architecture documentation
+├── MIGRATION.md                     # Migration guide
+└── README.md                        # This file
 ```
 
-## Policy Structure Requirements
+## 📋 Policy Structure Requirements
 
 Each policy version must follow this structure:
 
 ```
-policies/<policy-name>/<version>/
-├── src/                    # Required: Go source code directory
-│   └── *.go               # At least one .go file required
-├── docs/                   # Required: Documentation directory
-├── metadata.json          # Required: Policy metadata
-└── policy-definition.yaml # Required: Policy definition
+policies/<policy-name>/v<version>/
+├── metadata.json               # Required: Policy metadata
+├── policy-definition.yaml      # Required: Policy definition
+├── docs/                       # Required: Documentation directory
+│   ├── overview.md            # Required
+│   ├── configuration.md       # Required
+│   ├── examples.md            # Required
+│   ├── changelog.md           # Recommended
+│   └── faq.md                 # Recommended
+└── src/                       # Required: Source code directory
+    └── main.go                # At least one source file
 ```
 
 ### Version Format
-- Must follow semantic versioning: `vX.Y.Z` (e.g., `v1.0.0`, `v2.1.3`)
+- Must follow semantic versioning: `v<major>.<minor>.<patch>`
 - Examples: `v1.0.0`, `v1.1.0`, `v2.0.0`
 
-### metadata.json Example
+### metadata.json Schema
 ```json
 {
-  "name": "network-policy",
+  "name": "rate-limiter",
   "version": "v1.0.0",
-  "description": "Network access control policy",
-  "author": "Security Team",
-  "tags": ["network", "security"],
-  "compatibility": ">=v1.0.0"
+  "description": "Rate limiting policy for API requests",
+  "author": "Platform Team",
+  "category": "traffic-management",
+  "tags": ["rate-limiting", "api", "protection"],
+  "documentation": "https://docs.example.com/policies/rate-limiter"
 }
 ```
 
-### policy-definition.yaml Example
+### policy-definition.yaml Schema
 ```yaml
 apiVersion: policy/v1
 kind: Policy
 metadata:
-  name: network-policy
+  name: rate-limiter
+  version: v1.0.0
 spec:
-  rules:
-    - name: allow-internal
-      condition: "source.internal == true"
-      action: allow
-    - name: deny-external
-      condition: "source.external == true"
-      action: deny
+  type: rate-limiting
+  configuration:
+    maxRequests: 100
+    windowSeconds: 60
+  enforcement: hard
 ```
 
-## Workflows
+## 🔄 Workflow Overview
 
-### 1. PR Validation (`pr-validate.yml`)
-- **Trigger**: Pull requests affecting `policies/**`
+### Batch Release Workflow
+
+**Trigger**: GitHub Release published
+
+**Jobs**:
+
+1. **Initialize** - Get or create baseline SHA
+2. **Detect Policies** - Find changed policies since baseline
+3. **Validate & Check** - Parallel validation and delivery status check
+4. **Publish Policies** - Parallel publishing with idempotency
+5. **Finalize State** - Merge and commit delivery state
+6. **Summary** - Generate release report
+
+**Behavior**:
+
+| Scenario | Action |
+|----------|--------|
+| New policy | ✅ Validate and publish |
+| Changed policy (SHA different) | ✅ Validate and publish |
+| Already published (SHA same) | ⏭️ Skip |
+| Validation fails | ❌ Stop for that policy |
+| Publishing fails | ❌ Retry on next release |
+| Partial success | ✅ Successful policies saved, failed ones retry |
+
+## 🚀 Usage
+
+### Creating a Release
+
+```bash
+# Create and push a new tag
+git tag v1.2.0
+git push origin v1.2.0
+
+# Create release via GitHub CLI
+gh release create v1.2.0 \
+  --title "Release v1.2.0" \
+  --notes "Added rate-limiter v1.0.1 and quota v2.0.0"
+
+# Or create via GitHub UI
+# Go to Releases → Create new release
+```
+
+### Monitoring Execution
+
+1. Go to **Actions** tab
+2. Find **Batch Release** workflow run
+3. Review job summaries:
+   - Policy detection count
+   - Validation results per policy
+   - Publishing status per policy
+   - Final delivery state
+
+### Checking State
+
+```bash
+# View baseline
+cat .state/baseline.sha
+
+# View all delivered policies
+cat .state/delivered.json | jq '.'
+
+# Check specific policy
+cat .state/delivered.json | jq '.["policies/rate-limiter/v1.0.0"]'
+
+# Count delivered policies
+cat .state/delivered.json | jq 'keys | length'
+```
+
+## 🐛 Troubleshooting
+
+### Policy Not Detected
+
+**Issue**: Changed policy not showing in detection
+
+**Solutions**:
+- Ensure folder format: `policies/<name>/v<version>/`
+- Check baseline SHA is correct: `cat .state/baseline.sha`
+- Verify changes are committed and pushed
+
+### Policy Fails Validation
+
+**Issue**: Validation errors prevent publishing
+
+**Solutions**:
+- Check required files exist
+- Validate metadata.json format
+- Ensure version matches folder name
+- Review validation logs in Actions
+
+### Publishing Fails
+
+**Issue**: API returns error
+
+**Solutions**:
+- Check `POLICY_HUB_API_KEY` secret is set
+- Verify `POLICY_HUB_API_URL` variable
+- Review API response in logs
+- Check network/firewall settings
+
+### State Not Updating
+
+**Issue**: delivered.json not reflecting successful deliveries
+
+**Solutions**:
+- Check finalize-state job succeeded
+- Verify GitHub token has push permissions
+- Pull latest changes: `git pull origin main`
+- Check for merge conflicts in .state/
+
+## 📚 Documentation
+
+- **[Architecture Guide](./ARCHITECTURE.md)** - Complete system architecture and design
+- **[Migration Guide](./MIGRATION.md)** - Migrating from old bash-based system
+- **[State Management](./.state/README.md)** - Understanding baseline and delivered.json
+- **[Configurable Validation](./CONFIGURABLE_VALIDATION.md)** - Validation rules
+
+## 🔮 Advanced Features
+
+### Parallel Processing Control
+
+Control concurrency via `MAX_PARALLEL` variable:
+
+```yaml
+# .github/workflows/batch-release.yml
+env:
+  MAX_PARALLEL: ${{ vars.MAX_PARALLEL || 3 }}
+```
+
+### Idempotency
+
+Publishing uses commit SHA as idempotency key:
+
+```javascript
+headers: {
+  'X-Idempotency-Key': commitSha
+}
+```
+
+API returns 409 for duplicate requests (treated as success).
+
+### State Merging
+
+Multiple parallel jobs update state independently. Final job merges all states:
+
+```javascript
+// Merge strategy: newer entries win
+Object.assign(mergedState, newState);
+```
+
+## 🤝 Contributing
+
+1. Create feature branch
+2. Add/modify policies in `policies/`
+3. Ensure validation passes locally
+4. Create pull request
+5. Merge after approval
+6. Create release to trigger deployment
+
+## 📊 Benefits
+
+| Feature | Benefit |
+|---------|---------|
+| **Folder-level tracking** | Failed policies don't block others |
+| **Idempotency** | Safe to retry without duplicates |
+| **Parallel processing** | Faster execution for many policies |
+| **Git-tracked state** | Full audit trail and history |
+| **JavaScript actions** | Easier to maintain and debug |
+| **Automatic retry** | Failed deliveries retry next release |
+| **Comprehensive validation** | Catch errors before API calls |
+
+## 📝 License
+
+[Add your license here]
+
+## 🆘 Support
+
+For issues or questions:
+- Check [Troubleshooting](#-troubleshooting) section
+- Review [Architecture Documentation](./ARCHITECTURE.md)
+- Check workflow logs in GitHub Actions
+- Create an issue with detailed description
+
+---
+
+**Version**: 2.0.0  
+**Architecture**: JavaScript-based with folder-level state management  
+**Last Updated**: December 2025
 - **Actions**:
   - Validates policy structure and required files
   - Checks semantic versioning format
