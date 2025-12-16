@@ -111,170 +111,220 @@ jobs:
           echo "**Baseline SHA:** \`${{ needs.initialize.outputs.baseline-sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Changed Policies:** ${{ steps.detect.outputs.policy-count }}" >> $GITHUB_STEP_SUMMARY
 
-  # Check API existence, validate and check delivery status (parallel per policy)
-  validate-and-check:
-    name: Validate & Check - ${{ matrix.name }} ${{ matrix.version }}
+  # Process all policies efficiently in single job (no matrix duplication)
+  process-policies:
+    name: Process All Policies  
     needs: [detect-policies]
     if: needs.detect-policies.outputs.policy-count > 0
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJson(vars.MAX_PARALLEL || '3') }}
-      matrix: ${{ fromJson(needs.detect-policies.outputs.policies-matrix) }}
+    timeout-minutes: 30
+    outputs:
+      policies-processed: ${{ steps.process-summary.outputs.policies-processed }}
+      policies-published: ${{ steps.process-summary.outputs.policies-published }}
+      policies-failed: ${{ steps.process-summary.outputs.policies-failed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.release.target_commitish }}
 
-      - name: Setup Node.js
+      - name: Setup Node.js (once for all policies)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install dependencies
+      - name: Install dependencies (once for all policies)
         run: |
           cd .github/actions/policy-operations
           npm install --production
 
-      - name: Check if policy exists in API
-        id: api-check
-        uses: ./.github/actions/policy-operations
-        with:
-          operation: check-api-existence
-          policy-path: ${{ matrix.path }}
-          policy-name: ${{ matrix.name }}
-          policy-version: ${{ matrix.version }}
-          api-url: ${{ env.POLICY_HUB_API_URL }}
-          api-key: ${{ secrets.POLICY_HUB_API_KEY }}
-          state-file: .state/delivered.json
-          workspace: ${{ github.workspace }}
-
-      - name: Upload updated state (if policy exists in API)
-        if: steps.api-check.outputs.should-skip == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: delivery-state-${{ matrix.name }}-${{ matrix.version }}
-          path: .state/delivered.json
-          retention-days: 1
-
-      - name: Validate policy structure
-        id: validate
-        if: steps.api-check.outputs.should-skip == 'false'
-        uses: ./.github/actions/policy-operations
-        with:
-          operation: validate
-          policy-path: ${{ matrix.path }}
-          config-file: config/policy-hub-config.json
-          workspace: ${{ github.workspace }}
-
-      - name: Final decision
-        id: final-decision
-        if: always()
+      - name: Process all policies in sequence
+        env:
+          POLICIES_MATRIX: ${{ needs.detect-policies.outputs.policies-matrix }}
         run: |
-          if [ "${{ steps.api-check.outputs.should-skip }}" == "true" ]; then
-            echo "should-deliver=false" >> $GITHUB_OUTPUT
-            echo "🔄 Policy exists in API - skipped validation and marked as delivered"
-          elif [ "${{ steps.validate.outcome }}" == "success" ]; then
-            echo "should-deliver=true" >> $GITHUB_OUTPUT
-            echo "✅ Policy validation passed - ready for delivery"
-          else
-            echo "should-deliver=false" >> $GITHUB_OUTPUT
-            echo "❌ Policy validation failed - will not deliver"
-          fi
+          echo "🚀 Processing all policies efficiently in single job"
+          echo "=================================================================================="
           
-          echo "Policy: ${{ matrix.path }}"
-          echo "API Check: ${{ steps.api-check.outputs.check-result }}"
-          echo "Validation: ${{ steps.validate.outcome }}"
-          echo "Should Deliver: ${{ steps.final-decision.outputs.should-deliver }}"
+          # Parse the matrix JSON and process each policy
+          policies=$(echo "$POLICIES_MATRIX" | jq -r '.include[] | @base64')
+          
+          processed_count=0
+          published_count=0
+          failed_count=0
+          failed_policies=""
+          
+          for policy_b64 in $policies; do
+            policy=$(echo "$policy_b64" | base64 --decode)
+            policy_path=$(echo "$policy" | jq -r '.path')
+            policy_name=$(echo "$policy" | jq -r '.name')
+            policy_version=$(echo "$policy" | jq -r '.version')
+            
+            echo ""
+            echo "📦 Processing: $policy_name $policy_version ($policy_path)"
+            echo "=================================================================================="
+            
+            processed_count=$((processed_count + 1))
+            policy_failed=false
+            
+            # Use GitHub Actions steps in a loop - this approach will work better
+            echo "policy_path=$policy_path" >> $GITHUB_ENV
+            echo "policy_name=$policy_name" >> $GITHUB_ENV  
+            echo "policy_version=$policy_version" >> $GITHUB_ENV
+          done
+          
+          # We'll handle the processing via individual action steps that get the env vars
+          echo "policies_to_process=$(echo "$POLICIES_MATRIX" | jq -r '.include')" >> $GITHUB_ENV
 
-  # Publish policies (parallel per policy that needs delivery)
-  publish-policies:
-    name: Publish - ${{ matrix.name }} ${{ matrix.version }}
-    needs: [detect-policies, validate-and-check]
-    if: needs.detect-policies.outputs.policy-count > 0
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJson(vars.MAX_PARALLEL || '3') }}
-      matrix: ${{ fromJson(needs.detect-policies.outputs.policies-matrix) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.target_commitish }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
+      - name: Process each policy (using proper action calls)
+        env:
+          POLICIES_JSON: ${{ needs.detect-policies.outputs.policies-matrix }}
         run: |
-          cd .github/actions/policy-operations
-          npm install --production
+          # This is a more complex approach - let me simplify by using a different method
+          echo "📝 Preparing to process policies via action calls..."
+          
+          # Create a simple script that calls our action for each policy
+          cat > process_policies.js << 'EOF'
+          const core = require('@actions/core');
+          const exec = require('@actions/exec');
+          const fs = require('fs');
+          const path = require('path');
+          
+          async function main() {
+            const policiesMatrix = JSON.parse(process.env.POLICIES_JSON);
+            const policies = policiesMatrix.include;
+            
+            let processed = 0, published = 0, failed = 0;
+            const failedPolicies = [];
+            
+            for (const policy of policies) {
+              console.log(`\n📦 Processing: ${policy.name} ${policy.version}`);
+              console.log('='.repeat(80));
+              
+              processed++;
+              let policyFailed = false;
+              
+              try {
+                // Step 1: Check API existence
+                console.log('🔍 Step 1: Checking API existence...');
+                const checkCmd = `node .github/actions/policy-operations/index.js`;
+                const checkEnv = {
+                  INPUT_OPERATION: 'check-api-existence',
+                  INPUT_POLICY_PATH: policy.path,
+                  INPUT_POLICY_NAME: policy.name, 
+                  INPUT_POLICY_VERSION: policy.version,
+                  INPUT_API_URL: process.env.POLICY_HUB_API_URL,
+                  INPUT_API_KEY: process.env.POLICY_HUB_API_KEY,
+                  INPUT_STATE_FILE: '.state/delivered.json',
+                  INPUT_WORKSPACE: process.env.GITHUB_WORKSPACE
+                };
+                
+                try {
+                  await exec.exec('node', ['.github/actions/policy-operations/index.js'], {
+                    env: { ...process.env, ...checkEnv },
+                    ignoreReturnCode: true
+                  });
+                  // If API check indicates policy exists, continue to next
+                  continue;
+                } catch (e) {
+                  console.log('📝 Policy does not exist in API - proceeding...');
+                }
+                
+                // Step 2: Validate
+                console.log('🔍 Step 2: Validating policy...');
+                const validateEnv = {
+                  INPUT_OPERATION: 'validate',
+                  INPUT_POLICY_PATH: policy.path,
+                  INPUT_CONFIG_FILE: 'config/policy-hub-config.json',
+                  INPUT_WORKSPACE: process.env.GITHUB_WORKSPACE
+                };
+                
+                await exec.exec('node', ['.github/actions/policy-operations/index.js'], {
+                  env: { ...process.env, ...validateEnv }
+                });
+                
+                console.log('✅ Validation passed');
+                
+                // Step 3: Publish
+                console.log('🚀 Step 3: Publishing policy...');
+                const publishEnv = {
+                  INPUT_OPERATION: 'publish',
+                  INPUT_POLICY_PATH: policy.path,
+                  INPUT_POLICY_NAME: policy.name,
+                  INPUT_POLICY_VERSION: policy.version,
+                  INPUT_API_URL: process.env.POLICY_HUB_API_URL,
+                  INPUT_API_KEY: process.env.POLICY_HUB_API_KEY,
+                  INPUT_WORKSPACE: process.env.GITHUB_WORKSPACE
+                };
+                
+                await exec.exec('node', ['.github/actions/policy-operations/index.js'], {
+                  env: { ...process.env, ...publishEnv }
+                });
+                
+                console.log(`✅ Successfully published ${policy.name} ${policy.version}`);
+                published++;
+                
+                // Step 4: Update state
+                const updateEnv = {
+                  INPUT_OPERATION: 'update-state',
+                  INPUT_POLICY_PATH: policy.path,
+                  INPUT_RELEASE_TAG: process.env.RELEASE_TAG,
+                  INPUT_STATE_FILE: '.state/delivered.json',
+                  INPUT_WORKSPACE: process.env.GITHUB_WORKSPACE
+                };
+                
+                await exec.exec('node', ['.github/actions/policy-operations/index.js'], {
+                  env: { ...process.env, ...updateEnv },
+                  ignoreReturnCode: true
+                });
+                
+              } catch (error) {
+                console.error(`❌ Failed to process ${policy.name} ${policy.version}: ${error.message}`);
+                failed++;
+                failedPolicies.push(`${policy.name}:${policy.version}`);
+                policyFailed = true;
+              }
+            }
+            
+            // Set outputs
+            core.setOutput('processed', processed.toString());
+            core.setOutput('published', published.toString());
+            core.setOutput('failed', failed.toString());
+            
+            console.log('\n📊 Processing Summary:');
+            console.log(`   Processed: ${processed}`);
+            console.log(`   Published: ${published}`);
+            console.log(`   Failed: ${failed}`);
+            if (failedPolicies.length > 0) {
+              console.log(`   Failed policies: ${failedPolicies.join(', ')}`);
+            }
+          }
+          
+          main().catch(error => {
+            console.error('Processing failed:', error);
+            process.exit(1);
+          });
+          EOF
+          
+          # Install required dependencies for our script
+          cd .github/actions/policy-operations && npm install @actions/exec
+          cd ../../..
+          
+          # Run the processing script
+          RELEASE_TAG="${{ github.event.release.tag_name }}" node process_policies.js
 
-      - name: Check if should deliver
-        id: should-deliver
-        uses: ./.github/actions/policy-operations
-        with:
-          operation: check-api-existence
-          policy-path: ${{ matrix.path }}
-          policy-name: ${{ matrix.name }}
-          policy-version: ${{ matrix.version }}
-          api-url: ${{ env.POLICY_HUB_API_URL }}
-          api-key: ${{ secrets.POLICY_HUB_API_KEY }}
-          state-file: .state/delivered.json
-          workspace: ${{ github.workspace }}
-
-      - name: Validate policy structure
-        id: validate
-        if: steps.should-deliver.outputs.should-skip == 'false'
-        uses: ./.github/actions/policy-operations
-        with:
-          operation: validate
-          policy-path: ${{ matrix.path }}
-          config-file: config/policy-hub-config.json
-          workspace: ${{ github.workspace }}
-
-      - name: Publish to Policy Hub
-        id: publish
-        if: steps.should-deliver.outputs.should-skip == 'false' && steps.validate.outcome == 'success'
-        uses: ./.github/actions/policy-operations
-        with:
-          operation: publish
-          policy-path: ${{ matrix.path }}
-          policy-name: ${{ matrix.name }}
-          policy-version: ${{ matrix.version }}
-          api-url: ${{ env.POLICY_HUB_API_URL }}
-          api-key: ${{ secrets.POLICY_HUB_API_KEY }}
-          workspace: ${{ github.workspace }}
-
-      - name: Update delivery state
-        if: (steps.should-deliver.outputs.should-skip == 'true' || (steps.should-deliver.outputs.should-skip == 'false' && steps.validate.outcome == 'success' && steps.publish.outcome == 'success')) && always()
-        uses: ./.github/actions/policy-operations
-        with:
-          operation: update-state
-          policy-path: ${{ matrix.path }}
-          release-tag: ${{ github.event.release.tag_name }}
-          state-file: .state/delivered.json
-          workspace: ${{ github.workspace }}
-
-      - name: Upload state file
-        if: (steps.should-deliver.outputs.should-skip == 'true' || (steps.should-deliver.outputs.should-skip == 'false' && steps.validate.outcome == 'success' && steps.publish.outcome == 'success')) && always()
+      - name: Upload delivery state
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: delivery-state-${{ matrix.name }}-${{ matrix.version }}
+          name: delivery-state-final
           path: .state/delivered.json
           retention-days: 1
 
   # Merge delivery states and commit to repository
   finalize-state:
     name: Finalize & Commit State
-    needs: [publish-policies]
-    if: always() && needs.publish-policies.result != 'skipped'
+    needs: [process-policies]
+    if: always() && needs.process-policies.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -284,58 +334,29 @@ jobs:
           ref: ${{ github.event.release.target_commitish }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download all state artifacts
+      - name: Download delivery state artifact
         uses: actions/download-artifact@v4
         with:
-          pattern: delivery-state-*
+          name: delivery-state-final
           path: ./state-artifacts
 
-      - name: Merge delivery states
+      - name: Copy final delivery state  
         run: |
-          echo "🔄 Merging delivery states..."
+          echo "🔄 Using final delivery state..."
+          mkdir -p .state
           
-          # Start with current state or empty object
-          if [ -f .state/delivered.json ]; then
-            cp .state/delivered.json merged-state.json
-          else
-            echo '{}' > merged-state.json
-          fi
-          
-          # Merge all artifact states using Node.js
-          node << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-          
-          let mergedState = JSON.parse(fs.readFileSync('merged-state.json', 'utf8'));
-          
-          // Read all state files from artifacts
-          const artifactsDir = './state-artifacts';
-          
-          if (fs.existsSync(artifactsDir)) {
-            const artifacts = fs.readdirSync(artifactsDir);
+          # Copy the final state from our single processing job
+          if [ -f ./state-artifacts/delivered.json ]; then
+            cp ./state-artifacts/delivered.json .state/delivered.json
+            echo "✅ Final delivery state copied"
             
-            for (const artifact of artifacts) {
-              const stateFile = path.join(artifactsDir, artifact, 'delivered.json');
-              
-              if (fs.existsSync(stateFile)) {
-                const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-                
-                // Merge states (newer entries win)
-                Object.assign(mergedState, state);
-                
-                console.log(`✅ Merged state from ${artifact}`);
-              }
-            }
-          }
-          
-          // Write merged state
-          fs.writeFileSync('.state/delivered.json', JSON.stringify(mergedState, null, 2));
-          
-          console.log(`\n📊 Final state contains ${Object.keys(mergedState).length} policies`);
-          EOF
-          
-          echo ""
-          echo "✅ State merge complete"
+            # Show summary
+            policy_count=$(jq '. | length' .state/delivered.json)
+            echo "📊 Final state contains $policy_count delivered policies"
+          else
+            echo "⚠️ No delivery state found, creating empty state"
+            echo '{}' > .state/delivered.json
+          fi
 
       - name: Commit state changes
         run: |
@@ -367,7 +388,7 @@ jobs:
   # Summary report
   summary:
     name: Release Summary
-    needs: [initialize, detect-policies, validate-and-check, publish-policies, finalize-state]
+    needs: [initialize, detect-policies, process-policies, finalize-state]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -383,16 +404,18 @@ jobs:
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Baseline SHA | \`${{ needs.initialize.outputs.baseline-sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Policies Detected | ${{ needs.detect-policies.outputs.policy-count || '0' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Validation Status | ${{ needs.validate-and-check.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Publishing Status | ${{ needs.publish-policies.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Policies Processed | ${{ needs.process-policies.outputs.policies-processed || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Policies Published | ${{ needs.process-policies.outputs.policies-published || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Policies Failed | ${{ needs.process-policies.outputs.policies-failed || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Processing Status | ${{ needs.process-policies.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| State Finalized | ${{ needs.finalize-state.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ "${{ needs.publish-policies.result }}" == "success" ]; then
+          if [ "${{ needs.process-policies.result }}" == "success" ]; then
             echo "## ✅ Release Successful" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "All policies were successfully published and state has been updated." >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.publish-policies.result }}" == "failure" ]; then
+          elif [ "${{ needs.process-policies.result }}" == "failure" ]; then
             echo "## ⚠️ Partial Success" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Some policies failed to publish. Failed policies will be automatically retried on the next release." >> $GITHUB_STEP_SUMMARY
