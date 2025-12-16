@@ -105,8 +105,8 @@ class PolicyOperations {
     const config = await this.readJsonFile(configPath);
     const result = { errors: [], warnings: [] };
     
-    await this.validateStructure(policyDir, result);
-    await this.validateMetadata(policyDir, policyName, policyVersion, result);
+    await this.validateStructure(policyDir, config, result);
+    await this.validateMetadata(policyDir, policyName, policyVersion, config, result);
     await this.validateDocumentation(policyDir, config, result);
     await this.validateSource(policyDir, result);
     await this.validatePolicyDefinition(policyDir, result);
@@ -117,7 +117,23 @@ class PolicyOperations {
     core.setOutput('validation-warnings', JSON.stringify(result.warnings));
     
     if (!isValid) {
-      throw new Error(`Policy validation failed with ${result.errors.length} error(s)`);
+      core.error(`❌ Policy validation failed with ${result.errors.length} error(s):`);
+      result.errors.forEach((error, index) => {
+        const errorMsg = typeof error === 'string' ? error : error.message || error;
+        const fileInfo = error.file ? ` in ${error.file}` : '';
+        core.error(`  ${index + 1}. ${errorMsg}${fileInfo}`);
+      });
+      
+      if (result.warnings.length > 0) {
+        core.warning(`⚠️ ${result.warnings.length} warning(s):`);
+        result.warnings.forEach((warning, index) => {
+          const warningMsg = typeof warning === 'string' ? warning : warning.message || warning;
+          const fileInfo = warning.file ? ` in ${warning.file}` : '';
+          core.warning(`  ${index + 1}. ${warningMsg}${fileInfo}`);
+        });
+      }
+      
+      throw new Error(`Policy validation failed with ${result.errors.length} error(s). See details above.`);
     }
     
     return { valid: isValid, errors: result.errors, warnings: result.warnings };
@@ -353,9 +369,9 @@ class PolicyOperations {
     };
   }
 
-  async validateStructure(policyDir, result) {
-    const requiredFiles = ['metadata.json', 'policy-definition.yaml'];
-    const requiredDirs = ['docs', 'src'];
+  async validateStructure(policyDir, config, result) {
+    const requiredFiles = config?.validation?.requiredFiles || ['metadata.json', 'policy-definition.yaml'];
+    const requiredDirs = config?.validation?.requiredDirs || ['docs', 'src'];
     
     for (const file of requiredFiles) {
       const filePath = path.join(policyDir, file);
@@ -372,13 +388,13 @@ class PolicyOperations {
     }
   }
 
-  async validateMetadata(policyDir, policyName, policyVersion, result) {
+  async validateMetadata(policyDir, policyName, policyVersion, config, result) {
     const metadataPath = path.join(policyDir, 'metadata.json');
     const metadata = await this.readJsonFile(metadataPath);
     
     if (!metadata) return;
     
-    const requiredFields = ['name', 'version', 'description', 'author'];
+    const requiredFields = config?.validation?.requiredMetadataFields || ['name', 'version', 'description', 'provider'];
     
     for (const field of requiredFields) {
       if (!metadata[field]) {
@@ -407,7 +423,7 @@ class PolicyOperations {
     const docsDir = path.join(policyDir, 'docs');
     if (!await this.fileExists(docsDir)) return;
     
-    const requiredDocs = config?.validation?.requiredDocs || [
+    const requiredDocs = config?.validation?.requiredDocsFiles || [
       'overview.md', 'configuration.md', 'examples.md'
     ];
     
