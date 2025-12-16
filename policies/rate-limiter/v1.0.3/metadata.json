@@ -1,7 +1,7 @@
 {
   "name": "rate-limiter",
   "displayName": "Rate Limiting Policy",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "provider": "Community",
   "categories": ["security", "traffic-control"],
   "tags": ["limit", "quota", "api-protection"],

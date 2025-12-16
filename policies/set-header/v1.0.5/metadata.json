@@ -1,7 +1,7 @@
 {
   "name": "set-header",
   "displayName": "Set Header Policy",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "provider": "Community",
   "categories": ["transformations"],
   "tags": ["header", "manipulation"],
