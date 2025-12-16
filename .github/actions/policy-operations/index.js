@@ -193,7 +193,10 @@ class PolicyOperations {
       }
       
     } catch (error) {
-      core.warning(`API existence check failed: ${error.message}`);
+      core.warning(`❌ API existence check failed for ${policyName} ${policyVersion}`);
+      core.warning(`📍 API Endpoint: ${apiUrl}/policies/${encodeURIComponent(policyName)}/${encodeURIComponent(policyVersion)}`);
+      core.warning(`🚨 Error Details: ${error.message}`);
+      
       // On error, proceed with normal processing (don't block the workflow)
       core.setOutput('api-available', 'false');
       core.setOutput('policy-exists-in-api', 'false');
@@ -224,7 +227,20 @@ class PolicyOperations {
     }
     
     if (!result.success) {
-      throw new Error(`Failed to publish policy: ${result.message}`);
+      core.error(`❌ Failed to publish policy: ${policyName} ${policyVersion}`);
+      core.error(`📍 API Endpoint: ${apiUrl}/policies`);
+      core.error(`📊 HTTP Status: ${result.statusCode || 'Unknown'}`);
+      core.error(`📝 Response: ${result.message}`);
+      
+      if (result.data && typeof result.data === 'object') {
+        core.error(`🔍 Response Details: ${JSON.stringify(result.data, null, 2)}`);
+      }
+      
+      if (result.error) {
+        core.error(`🚨 Network Error: ${result.error.message}`);
+      }
+      
+      throw new Error(`Failed to publish policy: ${result.statusCode || 'Network Error'} - ${result.message}`);
     }
     
     return result;
@@ -612,10 +628,13 @@ class PolicyOperations {
         // Policy does not exist
         return { exists: false };
       } else {
-        throw new Error(`API returned unexpected status ${response.statusCode}: ${response.body}`);
+        throw new Error(`Unexpected API response: ${response.statusCode} - ${response.body}`);
       }
     } catch (error) {
-      throw new Error(`Failed to check policy existence: ${error.message}`);
+      if (error.message.includes('Unexpected API response')) {
+        throw error; // Re-throw with existing message
+      }
+      throw new Error(`Network error while checking policy existence: ${error.message}`);
     }
   }
 
