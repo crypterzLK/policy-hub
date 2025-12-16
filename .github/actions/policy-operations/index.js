@@ -410,7 +410,7 @@ class PolicyOperations {
       });
     }
     
-    if (metadata.version && metadata.version !== policyVersion) {
+    if (metadata.version && metadata.version !== policyVersion.replace(/^v/, '')) {
       result.errors.push({
         message: `metadata.json version "${metadata.version}" does not match folder version "${policyVersion}"`,
         file: 'metadata.json',
