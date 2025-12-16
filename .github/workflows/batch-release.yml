@@ -122,8 +122,6 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJson(vars.MAX_PARALLEL || '3') }}
       matrix: ${{ fromJson(needs.detect-policies.outputs.policies-matrix) }}
-    outputs:
-      should-deliver-${{ matrix.path }}: ${{ steps.final-decision.outputs.should-deliver }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -220,20 +218,30 @@ jobs:
 
       - name: Check if should deliver
         id: should-deliver
-        run: |
-          # This step will be skipped if the policy doesn't need delivery
-          SHOULD_DELIVER="${{ needs.validate-and-check.outputs[format('should-deliver-{0}', matrix.path)] }}"
-          echo "Should deliver this policy: $SHOULD_DELIVER"
-          echo "should-deliver=$SHOULD_DELIVER" >> $GITHUB_OUTPUT
-          
-          if [ "$SHOULD_DELIVER" != "true" ]; then
-            echo "⏭️ Skipping policy - no delivery needed"
-            exit 0
-          fi
+        uses: ./.github/actions/policy-operations
+        with:
+          operation: check-api-existence
+          policy-path: ${{ matrix.path }}
+          policy-name: ${{ matrix.name }}
+          policy-version: ${{ matrix.version }}
+          api-url: ${{ env.POLICY_HUB_API_URL }}
+          api-key: ${{ secrets.POLICY_HUB_API_KEY }}
+          state-file: .state/delivered.json
+          workspace: ${{ github.workspace }}
+
+      - name: Validate policy structure
+        id: validate
+        if: steps.should-deliver.outputs.should-skip == 'false'
+        uses: ./.github/actions/policy-operations
+        with:
+          operation: validate
+          policy-path: ${{ matrix.path }}
+          config-file: config/policy-hub-config.json
+          workspace: ${{ github.workspace }}
 
       - name: Publish to Policy Hub
         id: publish
-        if: steps.should-deliver.outputs.should-deliver == 'true'
+        if: steps.should-deliver.outputs.should-skip == 'false' && steps.validate.outcome == 'success'
         uses: ./.github/actions/policy-operations
         with:
           operation: publish
@@ -245,7 +253,7 @@ jobs:
           workspace: ${{ github.workspace }}
 
       - name: Update delivery state
-        if: steps.should-deliver.outputs.should-deliver == 'true' && success()
+        if: (steps.should-deliver.outputs.should-skip == 'true' || (steps.should-deliver.outputs.should-skip == 'false' && steps.validate.outcome == 'success' && steps.publish.outcome == 'success')) && always()
         uses: ./.github/actions/policy-operations
         with:
           operation: update-state
@@ -255,7 +263,7 @@ jobs:
           workspace: ${{ github.workspace }}
 
       - name: Upload state file
-        if: steps.should-deliver.outputs.should-deliver == 'true' && success()
+        if: (steps.should-deliver.outputs.should-skip == 'true' || (steps.should-deliver.outputs.should-skip == 'false' && steps.validate.outcome == 'success' && steps.publish.outcome == 'success')) && always()
         uses: actions/upload-artifact@v4
         with:
           name: delivery-state-${{ matrix.name }}-${{ matrix.version }}
