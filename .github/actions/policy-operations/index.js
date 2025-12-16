@@ -144,7 +144,6 @@ class PolicyOperations {
   async checkApiExistence() {
     const policyName = core.getInput('policy-name', { required: true });
     const policyVersion = core.getInput('policy-version', { required: true });
-    const policySha = core.getInput('policy-sha', { required: true });
     const apiUrl = core.getInput('api-url', { required: true });
     const apiKey = core.getInput('api-key', { required: true });
     const stateFile = core.getInput('state-file', { required: true });
@@ -193,7 +192,6 @@ class PolicyOperations {
     const policyPath = core.getInput('policy-path', { required: true });
     const policyName = core.getInput('policy-name', { required: true });
     const policyVersion = core.getInput('policy-version', { required: true });
-    const policySha = core.getInput('policy-sha', { required: true });
     const apiUrl = core.getInput('api-url', { required: true });
     const apiKey = core.getInput('api-key', { required: true });
     

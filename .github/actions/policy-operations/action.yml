@@ -13,9 +13,6 @@ inputs:
   policy-version:
     description: 'Policy version'
     required: false
-  policy-sha:
-    description: 'Policy SHA'
-    required: false
   baseline-sha:
     description: 'Baseline SHA for detection'
     required: false
