@@ -128,8 +128,8 @@ jobs:
           while IFS= read -r path; do
             if [[ $path =~ ^policies/([^/]+)/v([^/]+)/ ]]; then
               POLICY_NAME="${BASH_REMATCH[1]}"
-              VERSION="${BASH_REMATCH[2]}"
-              POLICY_PATH="policies/$POLICY_NAME/v$VERSION"
+              VERSION="v${BASH_REMATCH[2]}"
+              POLICY_PATH="policies/$POLICY_NAME/$VERSION"
 
               # Validate policy name and version format
               if [[ ! "$POLICY_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
@@ -180,34 +180,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate policy structure
-        run: |
-          POLICY_PATH="${{ matrix.policy.path }}"
-          if [ ! -d "$POLICY_PATH" ]; then
-            echo "❌ Policy directory not found: $POLICY_PATH"
-            exit 1
-          fi
-
-          # Check required files exist
-          REQUIRED_FILES=("metadata.json" "policy-definition.yaml")
-          for file in "${REQUIRED_FILES[@]}"; do
-            if [ ! -f "$POLICY_PATH/$file" ]; then
-              echo "❌ Required file missing: $POLICY_PATH/$file"
-              exit 1
-            fi
-          done
-
-          # Validate JSON files
-          if ! jq empty "$POLICY_PATH/metadata.json" 2>/dev/null; then
-            echo "❌ Invalid metadata.json"
-            exit 1
-          fi
-
-          echo "✅ Policy structure validated"
-
       - name: Validate policy
         run: |
-          if ./scripts/validate-policy.sh ${{ matrix.policy.path }} ${{ matrix.policy.version }} > validation.log 2>&1; then
+          if ./scripts/validate-policy.sh ${{ matrix.policy.name }} ${{ matrix.policy.version }} > validation.log 2>&1; then
             echo '{"status": "success"}' > validation-result.json
           else
             echo '{"status": "failed"}' > validation-result.json
@@ -243,34 +218,6 @@ jobs:
             exit 1
           fi
           echo "✅ ZIP prepared successfully"
-
-      - name: Validate files for publishing
-        run: |
-          METADATA_FILE="${{ matrix.policy.path }}/metadata.json"
-          DEFINITION_FILE="${{ matrix.policy.path }}/policy-definition.yaml"
-          ZIP_FILE="${{ matrix.policy.name }}-${{ matrix.policy.version }}.zip"
-
-          # Validate files exist
-          for file in "$METADATA_FILE" "$DEFINITION_FILE" "$ZIP_FILE"; do
-            if [ ! -f "$file" ]; then
-              echo "❌ Required file missing: $file"
-              exit 1
-            fi
-          done
-
-          # Validate metadata JSON
-          if ! jq empty "$METADATA_FILE" 2>/dev/null; then
-            echo "❌ Invalid metadata.json"
-            exit 1
-          fi
-
-          # Validate policy definition (YAML)
-          if ! python3 -c "import yaml; yaml.safe_load(open('$DEFINITION_FILE'))" 2>/dev/null; then
-            echo "❌ Invalid policy-definition.yaml"
-            exit 1
-          fi
-
-          echo "✅ Files validated for publishing"
 
       - name: Publish policy
         run: |
