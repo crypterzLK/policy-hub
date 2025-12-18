@@ -166,7 +166,7 @@ jobs:
               fi
               POLICIES+=("{\"name\":\"$POLICY_NAME\",\"version\":\"$VERSION\",\"path\":\"$POLICY_PATH\"}")
             fi
-          done <<< "$CHANGED_PATHS"
+          done <<< "$CHANGED_POLICY_DIRS"
 
           # Process unique policies
           UNIQUE_POLICIES=$(printf '%s\n' "${POLICIES[@]}" | jq -s -c . 2>/dev/null)
@@ -287,9 +287,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout main branch
         uses: actions/checkout@v4
         with:
+          ref: main
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download all delivered states
@@ -345,10 +346,10 @@ jobs:
 
       - name: Push changes
         run: |
-          if git push; then
-            echo "✅ Changes pushed successfully"
+          if git push origin main; then
+            echo "✅ Changes pushed to main successfully"
           else
-            echo "❌ Failed to push changes"
+            echo "❌ Failed to push changes to main"
             exit 1
           fi
 
