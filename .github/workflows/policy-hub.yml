@@ -11,6 +11,8 @@ on:
 env:
   POLICY_HUB_API_URL: ${{ vars.POLICY_HUB_API_URL }}
   POLICY_HUB_API_KEY: ${{ secrets.POLICY_HUB_API_KEY }}
+  POLICY_HUB_AUTH_HEADER: ${{ vars.POLICY_HUB_AUTH_HEADER }}
+  POLICY_HUB_AUTH_VALUE: ${{ vars.POLICY_HUB_AUTH_VALUE }}
 
 jobs:
   initialize:
@@ -35,6 +37,13 @@ jobs:
           if [ -z "${{ env.POLICY_HUB_API_KEY }}" ]; then
             echo "❌ POLICY_HUB_API_KEY is not set"
             exit 1
+          fi
+          # Set defaults for auth header if not provided
+          if [ -z "${{ env.POLICY_HUB_AUTH_HEADER }}" ]; then
+            echo "POLICY_HUB_AUTH_HEADER=Authorization" >> $GITHUB_ENV
+          fi
+          if [ -z "${{ env.POLICY_HUB_AUTH_VALUE }}" ]; then
+            echo "POLICY_HUB_AUTH_VALUE=Bearer ${{ env.POLICY_HUB_API_KEY }}" >> $GITHUB_ENV
           fi
           echo "✅ Environment variables validated"
 
@@ -112,24 +121,24 @@ jobs:
 
           if [ "${{ needs.initialize.outputs.is_release }}" = "true" ]; then
             # For release, detect new versions since baseline
-            if ! CHANGED_PATHS=$(git diff --name-only "$BASELINE"..HEAD 2>/dev/null | grep '^policies/' | sort | uniq); then
+            if ! CHANGED_POLICY_DIRS=$(git diff --name-only "$BASELINE"..HEAD 2>/dev/null | grep '^policies/[^/]\+/v[^/]\+/' | sed 's|^\(policies/[^/]\+/v[^/]\+\)/.*|\1|' | sort | uniq); then
               echo "❌ Failed to get git diff for release"
               exit 1
             fi
           else
             # For PR, detect changed policies
-            if ! CHANGED_PATHS=$(git diff --name-only "${{ github.event.pull_request.base.sha }}".."${{ github.event.pull_request.head.sha }}" 2>/dev/null | grep '^policies/' | sort | uniq); then
+            if ! CHANGED_POLICY_DIRS=$(git diff --name-only "${{ github.event.pull_request.base.sha }}".."${{ github.event.pull_request.head.sha }}" 2>/dev/null | grep '^policies/[^/]\+/v[^/]\+/' | sed 's|^\(policies/[^/]\+/v[^/]\+\)/.*|\1|' | sort | uniq); then
               echo "❌ Failed to get git diff for PR"
               exit 1
             fi
           fi
 
           POLICIES=()
-          while IFS= read -r path; do
-            if [[ $path =~ ^policies/([^/]+)/v([^/]+)/ ]]; then
+          while IFS= read -r policy_dir; do
+            if [[ $policy_dir =~ ^policies/([^/]+)/v([^/]+)$ ]]; then
               POLICY_NAME="${BASH_REMATCH[1]}"
               VERSION="v${BASH_REMATCH[2]}"
-              POLICY_PATH="policies/$POLICY_NAME/$VERSION"
+              POLICY_PATH="$policy_dir"
 
               # Validate policy name and version format
               if [[ ! "$POLICY_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
@@ -159,8 +168,9 @@ jobs:
             fi
           done <<< "$CHANGED_PATHS"
 
-          # Remove duplicates and validate JSON
-          if ! UNIQUE_POLICIES=$(printf '%s\n' "${POLICIES[@]}" | jq -s 'unique_by(.name + .version)' | jq -c . 2>/dev/null); then
+          # Process unique policies
+          UNIQUE_POLICIES=$(printf '%s\n' "${POLICIES[@]}" | jq -s -c . 2>/dev/null)
+          if [ $? -ne 0 ]; then
             echo "❌ Failed to process policies JSON"
             exit 1
           fi
@@ -226,7 +236,7 @@ jobs:
 
           # Construct multipart payload with timeout
           if ! RESPONSE=$(curl -s -w "%{http_code}" --max-time 300 -X POST "${{ env.POLICY_HUB_API_URL }}" \
-            -H "Authorization: Bearer ${{ env.POLICY_HUB_API_KEY }}" \
+            -H "${{ env.POLICY_HUB_AUTH_HEADER }}: ${{ env.POLICY_HUB_AUTH_VALUE }}" \
             -H "Idempotency-Key: ${{ github.sha }}" \
             -F "policyName=${{ matrix.policy.name }}" \
             -F "version=${{ matrix.policy.version }}" \
