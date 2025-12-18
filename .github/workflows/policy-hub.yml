@@ -26,14 +26,50 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate environment
+        run: |
+          if [ -z "${{ env.POLICY_HUB_API_URL }}" ]; then
+            echo "❌ POLICY_HUB_API_URL is not set"
+            exit 1
+          fi
+          if [ -z "${{ env.POLICY_HUB_API_KEY }}" ]; then
+            echo "❌ POLICY_HUB_API_KEY is not set"
+            exit 1
+          fi
+          echo "✅ Environment variables validated"
+
+      - name: Validate tools
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "❌ jq is not installed"
+            exit 1
+          fi
+          if ! command -v git >/dev/null 2>&1; then
+            echo "❌ git is not available"
+            exit 1
+          fi
+          if ! command -v zip >/dev/null 2>&1; then
+            echo "❌ zip is not available"
+            exit 1
+          fi
+          echo "✅ Required tools available"
+
       - name: Read or initialize baseline
         id: baseline
         run: |
           if [ -f .state/baseline.sha ]; then
-            BASELINE_SHA=$(cat .state/baseline.sha)
-            echo "sha=$BASELINE_SHA" >> $GITHUB_OUTPUT
+            BASELINE_SHA=$(grep -E '^[0-9a-f]{40}$' .state/baseline.sha | head -1)
+            if [ -n "$BASELINE_SHA" ]; then
+              echo "sha=$BASELINE_SHA" >> $GITHUB_OUTPUT
+            else
+              # Invalid baseline, reinitialize
+              BASELINE_SHA=$(git rev-list --max-parents=0 HEAD)
+              echo "sha=$BASELINE_SHA" >> $GITHUB_OUTPUT
+              mkdir -p .state
+              echo "$BASELINE_SHA" > .state/baseline.sha
+            fi
           else
-            # Initialize with the initial commit or empty
+            # Initialize with the initial commit
             BASELINE_SHA=$(git rev-list --max-parents=0 HEAD)
             echo "sha=$BASELINE_SHA" >> $GITHUB_OUTPUT
             mkdir -p .state
@@ -62,26 +98,30 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download delivered state
-        if: needs.initialize.outputs.is_release == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: delivered-state
-          path: .state/
-        continue-on-error: true
-
       - name: Detect changed policies
         id: detect
         run: |
           BASELINE="${{ needs.initialize.outputs.baseline }}"
           POLICIES_JSON="[]"
 
+          # Validate baseline SHA
+          if ! git cat-file -e "$BASELINE" 2>/dev/null; then
+            echo "❌ Invalid baseline SHA: $BASELINE"
+            exit 1
+          fi
+
           if [ "${{ needs.initialize.outputs.is_release }}" = "true" ]; then
             # For release, detect new versions since baseline
-            CHANGED_PATHS=$(git diff --name-only $BASELINE..HEAD | grep '^policies/' | sort | uniq)
+            if ! CHANGED_PATHS=$(git diff --name-only "$BASELINE"..HEAD 2>/dev/null | grep '^policies/' | sort | uniq); then
+              echo "❌ Failed to get git diff for release"
+              exit 1
+            fi
           else
             # For PR, detect changed policies
-            CHANGED_PATHS=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | grep '^policies/' | sort | uniq)
+            if ! CHANGED_PATHS=$(git diff --name-only "${{ github.event.pull_request.base.sha }}".."${{ github.event.pull_request.head.sha }}" 2>/dev/null | grep '^policies/' | sort | uniq); then
+              echo "❌ Failed to get git diff for PR"
+              exit 1
+            fi
           fi
 
           POLICIES=()
@@ -90,11 +130,27 @@ jobs:
               POLICY_NAME="${BASH_REMATCH[1]}"
               VERSION="${BASH_REMATCH[2]}"
               POLICY_PATH="policies/$POLICY_NAME/v$VERSION"
+
+              # Validate policy name and version format
+              if [[ ! "$POLICY_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                echo "⚠️  Skipping invalid policy name: $POLICY_NAME"
+                continue
+              fi
+              if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "⚠️  Skipping invalid version: $VERSION"
+                continue
+              fi
+
               if [ "${{ needs.initialize.outputs.is_release }}" = "true" ]; then
                 # Check if already delivered
                 if [ -f .state/delivered.json ]; then
+                  if ! jq empty .state/delivered.json 2>/dev/null; then
+                    echo "❌ Invalid delivered.json format"
+                    exit 1
+                  fi
                   DELIVERED=$(jq -r ".\"$POLICY_NAME\".\"$VERSION\"" .state/delivered.json 2>/dev/null || echo "null")
                   if [ "$DELIVERED" != "null" ]; then
+                    echo "ℹ️  Policy $POLICY_NAME $VERSION already delivered, skipping"
                     continue
                   fi
                 fi
@@ -103,9 +159,13 @@ jobs:
             fi
           done <<< "$CHANGED_PATHS"
 
-          # Remove duplicates
-          UNIQUE_POLICIES=$(printf '%s\n' "${POLICIES[@]}" | jq -s 'unique_by(.name + .version)' | jq -c .)
+          # Remove duplicates and validate JSON
+          if ! UNIQUE_POLICIES=$(printf '%s\n' "${POLICIES[@]}" | jq -s 'unique_by(.name + .version)' | jq -c . 2>/dev/null); then
+            echo "❌ Failed to process policies JSON"
+            exit 1
+          fi
           echo "policies=$UNIQUE_POLICIES" >> $GITHUB_OUTPUT
+          echo "✅ Detected ${#POLICIES[@]} policies"
 
   validate:
     runs-on: ubuntu-latest
@@ -119,6 +179,31 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Validate policy structure
+        run: |
+          POLICY_PATH="${{ matrix.policy.path }}"
+          if [ ! -d "$POLICY_PATH" ]; then
+            echo "❌ Policy directory not found: $POLICY_PATH"
+            exit 1
+          fi
+
+          # Check required files exist
+          REQUIRED_FILES=("metadata.json" "policy-definition.yaml")
+          for file in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$POLICY_PATH/$file" ]; then
+              echo "❌ Required file missing: $POLICY_PATH/$file"
+              exit 1
+            fi
+          done
+
+          # Validate JSON files
+          if ! jq empty "$POLICY_PATH/metadata.json" 2>/dev/null; then
+            echo "❌ Invalid metadata.json"
+            exit 1
+          fi
+
+          echo "✅ Policy structure validated"
 
       - name: Validate policy
         run: |
@@ -147,16 +232,53 @@ jobs:
 
       - name: Prepare ZIP
         run: |
-          ./scripts/prepare-zip.sh ${{ matrix.policy.name }} ${{ matrix.policy.version }}
+          if ! ./scripts/prepare-zip.sh ${{ matrix.policy.name }} ${{ matrix.policy.version }}; then
+            echo "❌ Failed to prepare ZIP for ${{ matrix.policy.name }} ${{ matrix.policy.version }}"
+            exit 1
+          fi
+
+          ZIP_FILE="${{ matrix.policy.name }}-${{ matrix.policy.version }}.zip"
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "❌ ZIP file was not created: $ZIP_FILE"
+            exit 1
+          fi
+          echo "✅ ZIP prepared successfully"
+
+      - name: Validate files for publishing
+        run: |
+          METADATA_FILE="${{ matrix.policy.path }}/metadata.json"
+          DEFINITION_FILE="${{ matrix.policy.path }}/policy-definition.yaml"
+          ZIP_FILE="${{ matrix.policy.name }}-${{ matrix.policy.version }}.zip"
+
+          # Validate files exist
+          for file in "$METADATA_FILE" "$DEFINITION_FILE" "$ZIP_FILE"; do
+            if [ ! -f "$file" ]; then
+              echo "❌ Required file missing: $file"
+              exit 1
+            fi
+          done
+
+          # Validate metadata JSON
+          if ! jq empty "$METADATA_FILE" 2>/dev/null; then
+            echo "❌ Invalid metadata.json"
+            exit 1
+          fi
+
+          # Validate policy definition (YAML)
+          if ! python3 -c "import yaml; yaml.safe_load(open('$DEFINITION_FILE'))" 2>/dev/null; then
+            echo "❌ Invalid policy-definition.yaml"
+            exit 1
+          fi
+
+          echo "✅ Files validated for publishing"
 
       - name: Publish policy
         run: |
           ZIP_FILE="${{ matrix.policy.name }}-${{ matrix.policy.version }}.zip"
           METADATA_FILE="${{ matrix.policy.path }}/metadata.json"
-          DEFINITION_FILE="${{ matrix.policy.path }}/policy-definition.yaml"
 
-          # Construct multipart payload
-          RESPONSE=$(curl -s -w "%{http_code}" -X POST "${{ env.POLICY_HUB_API_URL }}" \
+          # Construct multipart payload with timeout
+          if ! RESPONSE=$(curl -s -w "%{http_code}" --max-time 300 -X POST "${{ env.POLICY_HUB_API_URL }}" \
             -H "Authorization: Bearer ${{ env.POLICY_HUB_API_KEY }}" \
             -H "Idempotency-Key: ${{ github.sha }}" \
             -F "policyName=${{ matrix.policy.name }}" \
@@ -165,13 +287,21 @@ jobs:
             -F "metadata=@$METADATA_FILE" \
             -F "documentation=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/docs/" \
             -F "assetsBaseUrl=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/assets/" \
-            -F "file=@$ZIP_FILE")
+            -F "file=@$ZIP_FILE" 2>/dev/null); then
+            echo "❌ curl command failed"
+            exit 1
+          fi
+
           HTTP_CODE=${RESPONSE: -3}
-          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "409" ]; then
-            echo "Publish successful (code: $HTTP_CODE)"
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            echo "✅ Publish successful (code: $HTTP_CODE)"
+            echo "SUCCESS" > publish-status.txt
+          elif [ "$HTTP_CODE" = "409" ]; then
+            echo "ℹ️  Policy already exists (code: $HTTP_CODE), treating as success"
             echo "SUCCESS" > publish-status.txt
           else
-            echo "Publish failed (code: $HTTP_CODE)"
+            echo "❌ Publish failed (code: $HTTP_CODE)"
+            echo "Response: ${RESPONSE%???}"
             echo "FAILED" > publish-status.txt
             exit 1
           fi
@@ -210,27 +340,60 @@ jobs:
         with:
           name: delivered-state-*
           path: .state/
+        continue-on-error: true
 
       - name: Merge delivered states
         run: |
-          # Merge all delivered.json files
-          jq -s 'reduce .[] as $item ({}; . * $item)' .state/delivered-*.json > .state/delivered.json
+          # Check if any delivered state files exist
+          if ! ls .state/delivered-*.json >/dev/null 2>&1; then
+            echo "ℹ️  No delivered state artifacts found, initializing empty state"
+            echo "{}" > .state/delivered.json
+          else
+            # Merge all delivered.json files
+            if ! jq -s 'reduce .[] as $item ({}; . * $item)' .state/delivered-*.json > .state/delivered.json.tmp 2>/dev/null; then
+              echo "❌ Failed to merge delivered states"
+              exit 1
+            fi
+            mv .state/delivered.json.tmp .state/delivered.json
+
+            # Validate merged JSON
+            if ! jq empty .state/delivered.json 2>/dev/null; then
+              echo "❌ Invalid merged delivered.json"
+              exit 1
+            fi
+          fi
+          echo "✅ Delivered states merged successfully"
 
       - name: Advance baseline
         if: success()
         run: |
           echo "${{ github.sha }}" > .state/baseline.sha
+          echo "✅ Baseline advanced to ${{ github.sha }}"
 
       - name: Commit state changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add .state/
-          git commit -m "Update policy hub state" || echo "No changes to commit"
+          if git diff --staged --quiet; then
+            echo "ℹ️  No changes to commit"
+          else
+            if git commit -m "Update policy hub state [${{ github.sha }}]"; then
+              echo "✅ State changes committed"
+            else
+              echo "❌ Failed to commit state changes"
+              exit 1
+            fi
+          fi
 
       - name: Push changes
         run: |
-          git push
+          if git push; then
+            echo "✅ Changes pushed successfully"
+          else
+            echo "❌ Failed to push changes"
+            exit 1
+          fi
 
   summary:
     runs-on: ubuntu-latest
@@ -249,18 +412,28 @@ jobs:
           echo "" >> summary.md
           echo "| Policy | Version | Status |" >> summary.md
           echo "|--------|---------|--------|" >> summary.md
-          POLICIES=${{ needs.detect-policies.outputs.policies }}
-          for policy in $(echo "$POLICIES" | jq -c '.[]'); do
-            NAME=$(echo "$policy" | jq -r '.name')
-            VERSION=$(echo "$policy" | jq -r '.version')
-            # Determine status based on job results
-            if [ "${{ needs.validate.result }}" = "success" ] && ([ "${{ needs.initialize.outputs.is_release }}" != "true" ] || [ "${{ needs.publish.result }}" = "success" ]); then
-              STATUS="✅ Success"
+
+          POLICIES='${{ needs.detect-policies.outputs.policies }}'
+          if [ "$POLICIES" = "[]" ] || [ -z "$POLICIES" ]; then
+            echo "| No policies | detected | ⚠️  |" >> summary.md
+          else
+            # Validate JSON
+            if ! echo "$POLICIES" | jq empty 2>/dev/null; then
+              echo "| Error | parsing policies | ❌ |" >> summary.md
             else
-              STATUS="❌ Failed"
+              echo "$POLICIES" | jq -c '.[]' | while read -r policy; do
+                NAME=$(echo "$policy" | jq -r '.name' 2>/dev/null || echo "unknown")
+                VERSION=$(echo "$policy" | jq -r '.version' 2>/dev/null || echo "unknown")
+                # Determine status based on job results
+                if [ "${{ needs.validate.result }}" = "success" ] && ([ "${{ needs.initialize.outputs.is_release }}" != "true" ] || [ "${{ needs.publish.result }}" = "success" ]); then
+                  STATUS="✅ Success"
+                else
+                  STATUS="❌ Failed"
+                fi
+                echo "| $NAME | $VERSION | $STATUS |" >> summary.md
+              done
             fi
-            echo "| $NAME | $VERSION | $STATUS |" >> summary.md
-          done
+          fi
           echo "" >> summary.md
           echo "### Artifacts" >> summary.md
           echo "- [Validation Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> summary.md
