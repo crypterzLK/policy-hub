@@ -1,0 +1,272 @@
+name: Policy Hub Validation and Publishing
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "policies/**"
+  release:
+    types: [published]
+
+env:
+  POLICY_HUB_API_URL: ${{ vars.POLICY_HUB_API_URL }}
+  POLICY_HUB_API_KEY: ${{ secrets.POLICY_HUB_API_KEY }}
+
+jobs:
+  initialize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      baseline: ${{ steps.baseline.outputs.sha }}
+      is_release: ${{ steps.check_trigger.outputs.is_release }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read or initialize baseline
+        id: baseline
+        run: |
+          if [ -f .state/baseline.sha ]; then
+            BASELINE_SHA=$(cat .state/baseline.sha)
+            echo "sha=$BASELINE_SHA" >> $GITHUB_OUTPUT
+          else
+            # Initialize with the initial commit or empty
+            BASELINE_SHA=$(git rev-list --max-parents=0 HEAD)
+            echo "sha=$BASELINE_SHA" >> $GITHUB_OUTPUT
+            mkdir -p .state
+            echo "$BASELINE_SHA" > .state/baseline.sha
+          fi
+
+      - name: Check trigger type
+        id: check_trigger
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+  detect-policies:
+    runs-on: ubuntu-latest
+    needs: initialize
+    permissions:
+      contents: read
+    outputs:
+      policies: ${{ steps.detect.outputs.policies }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download delivered state
+        if: needs.initialize.outputs.is_release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: delivered-state
+          path: .state/
+        continue-on-error: true
+
+      - name: Detect changed policies
+        id: detect
+        run: |
+          BASELINE="${{ needs.initialize.outputs.baseline }}"
+          POLICIES_JSON="[]"
+
+          if [ "${{ needs.initialize.outputs.is_release }}" = "true" ]; then
+            # For release, detect new versions since baseline
+            CHANGED_PATHS=$(git diff --name-only $BASELINE..HEAD | grep '^policies/' | sort | uniq)
+          else
+            # For PR, detect changed policies
+            CHANGED_PATHS=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | grep '^policies/' | sort | uniq)
+          fi
+
+          POLICIES=()
+          while IFS= read -r path; do
+            if [[ $path =~ ^policies/([^/]+)/v([^/]+)/ ]]; then
+              POLICY_NAME="${BASH_REMATCH[1]}"
+              VERSION="${BASH_REMATCH[2]}"
+              POLICY_PATH="policies/$POLICY_NAME/v$VERSION"
+              if [ "${{ needs.initialize.outputs.is_release }}" = "true" ]; then
+                # Check if already delivered
+                if [ -f .state/delivered.json ]; then
+                  DELIVERED=$(jq -r ".\"$POLICY_NAME\".\"$VERSION\"" .state/delivered.json 2>/dev/null || echo "null")
+                  if [ "$DELIVERED" != "null" ]; then
+                    continue
+                  fi
+                fi
+              fi
+              POLICIES+=("{\"name\":\"$POLICY_NAME\",\"version\":\"$VERSION\",\"path\":\"$POLICY_PATH\"}")
+            fi
+          done <<< "$CHANGED_PATHS"
+
+          # Remove duplicates
+          UNIQUE_POLICIES=$(printf '%s\n' "${POLICIES[@]}" | jq -s 'unique_by(.name + .version)' | jq -c .)
+          echo "policies=$UNIQUE_POLICIES" >> $GITHUB_OUTPUT
+
+  validate:
+    runs-on: ubuntu-latest
+    needs: [initialize, detect-policies]
+    if: needs.detect-policies.outputs.policies != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        policy: ${{ fromJson(needs.detect-policies.outputs.policies) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate policy
+        run: |
+          if ./scripts/validate-policy.sh ${{ matrix.policy.path }} ${{ matrix.policy.version }} > validation.log 2>&1; then
+            echo '{"status": "success"}' > validation-result.json
+          else
+            echo '{"status": "failed"}' > validation-result.json
+          fi
+          cat validation.log >> validation-result.json
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [initialize, detect-policies, validate]
+    if: needs.initialize.outputs.is_release == 'true' && needs.detect-policies.outputs.policies != '[]'
+    permissions:
+      contents: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        policy: ${{ fromJson(needs.detect-policies.outputs.policies) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare ZIP
+        run: |
+          ./scripts/prepare-zip.sh ${{ matrix.policy.name }} ${{ matrix.policy.version }}
+
+      - name: Publish policy
+        run: |
+          ZIP_FILE="${{ matrix.policy.name }}-${{ matrix.policy.version }}.zip"
+          METADATA_FILE="${{ matrix.policy.path }}/metadata.json"
+          DEFINITION_FILE="${{ matrix.policy.path }}/policy-definition.yaml"
+
+          # Construct multipart payload
+          RESPONSE=$(curl -s -w "%{http_code}" -X POST "${{ env.POLICY_HUB_API_URL }}" \
+            -H "Authorization: Bearer ${{ env.POLICY_HUB_API_KEY }}" \
+            -H "Idempotency-Key: ${{ github.sha }}" \
+            -F "policyName=${{ matrix.policy.name }}" \
+            -F "version=${{ matrix.policy.version }}" \
+            -F "definitionUrl=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/policy-definition.yaml" \
+            -F "metadata=@$METADATA_FILE" \
+            -F "documentation=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/docs/" \
+            -F "assetsBaseUrl=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/assets/" \
+            -F "file=@$ZIP_FILE")
+          HTTP_CODE=${RESPONSE: -3}
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "409" ]; then
+            echo "Publish successful (code: $HTTP_CODE)"
+            echo "SUCCESS" > publish-status.txt
+          else
+            echo "Publish failed (code: $HTTP_CODE)"
+            echo "FAILED" > publish-status.txt
+            exit 1
+          fi
+
+      - name: Record delivery
+        if: success()
+        run: |
+          mkdir -p .state
+          if [ ! -f .state/delivered.json ]; then
+            echo "{}" > .state/delivered.json
+          fi
+          jq ".\"${{ matrix.policy.name }}\".\"${{ matrix.policy.version }}\" = {\"releasedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"releaseSha\": \"${{ github.sha }}\"}" .state/delivered.json > .state/delivered.json.tmp
+          mv .state/delivered.json.tmp .state/delivered.json
+
+      - name: Upload delivered state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivered-state-${{ matrix.policy.name }}-${{ matrix.policy.version }}
+          path: .state/delivered.json
+
+  finalize-state:
+    runs-on: ubuntu-latest
+    needs: [initialize, publish]
+    if: needs.initialize.outputs.is_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all delivered states
+        uses: actions/download-artifact@v4
+        with:
+          name: delivered-state-*
+          path: .state/
+
+      - name: Merge delivered states
+        run: |
+          # Merge all delivered.json files
+          jq -s 'reduce .[] as $item ({}; . * $item)' .state/delivered-*.json > .state/delivered.json
+
+      - name: Advance baseline
+        if: success()
+        run: |
+          echo "${{ github.sha }}" > .state/baseline.sha
+
+      - name: Commit state changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .state/
+          git commit -m "Update policy hub state" || echo "No changes to commit"
+
+      - name: Push changes
+        run: |
+          git push
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: [initialize, detect-policies, validate, publish, finalize-state]
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## Policy Hub Workflow Summary" >> summary.md
+          echo "" >> summary.md
+          if [ "${{ needs.initialize.outputs.is_release }}" = "true" ]; then
+            echo "### Release Publishing" >> summary.md
+          else
+            echo "### Pull Request Validation" >> summary.md
+          fi
+          echo "" >> summary.md
+          echo "| Policy | Version | Status |" >> summary.md
+          echo "|--------|---------|--------|" >> summary.md
+          POLICIES=${{ needs.detect-policies.outputs.policies }}
+          for policy in $(echo "$POLICIES" | jq -c '.[]'); do
+            NAME=$(echo "$policy" | jq -r '.name')
+            VERSION=$(echo "$policy" | jq -r '.version')
+            # Determine status based on job results
+            if [ "${{ needs.validate.result }}" = "success" ] && ([ "${{ needs.initialize.outputs.is_release }}" != "true" ] || [ "${{ needs.publish.result }}" = "success" ]); then
+              STATUS="✅ Success"
+            else
+              STATUS="❌ Failed"
+            fi
+            echo "| $NAME | $VERSION | $STATUS |" >> summary.md
+          done
+          echo "" >> summary.md
+          echo "### Artifacts" >> summary.md
+          echo "- [Validation Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> summary.md
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-summary
+          path: summary.md
