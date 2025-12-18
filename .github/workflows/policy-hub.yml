@@ -234,15 +234,31 @@ jobs:
           ZIP_FILE="${{ matrix.policy.name }}-${{ matrix.policy.version }}.zip"
           METADATA_FILE="${{ matrix.policy.path }}/metadata.json"
 
+          # Read and process metadata JSON
+          if ! METADATA_JSON=$(cat "$METADATA_FILE"); then
+            echo "❌ Failed to read metadata file"
+            exit 1
+          fi
+
+          # Process documentation URLs
+          DOCS_BASE_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}"
+          if ! DOCUMENTATION_JSON=$(echo "$METADATA_JSON" | jq -r '.documentation // {}' | jq -c "with_entries(.value = \"$DOCS_BASE_URL/\" + .value)"); then
+            echo "❌ Failed to process documentation URLs"
+            exit 1
+          fi
+
+          # Construct API URL
+          API_URL="${{ env.POLICY_HUB_API_URL }}/policies/${{ matrix.policy.name }}/versions/${{ matrix.policy.version }}"
+
           # Construct multipart payload with timeout
-          if ! RESPONSE=$(curl -s -w "%{http_code}" --max-time 300 -X POST "${{ env.POLICY_HUB_API_URL }}" \
+          if ! RESPONSE=$(curl -s -w "%{http_code}" --max-time 300 -X POST "$API_URL" \
             -H "${{ env.POLICY_HUB_AUTH_HEADER }}: ${{ env.POLICY_HUB_AUTH_VALUE }}" \
             -H "Idempotency-Key: ${{ github.sha }}" \
             -F "policyName=${{ matrix.policy.name }}" \
             -F "version=${{ matrix.policy.version }}" \
             -F "definitionUrl=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/policy-definition.yaml" \
-            -F "metadata=@$METADATA_FILE" \
-            -F "documentation=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/docs/" \
+            -F "metadata=$METADATA_JSON" \
+            -F "documentation=$DOCUMENTATION_JSON" \
             -F "assetsBaseUrl=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${{ matrix.policy.path }}/assets/" \
             -F "file=@$ZIP_FILE" 2>/dev/null); then
             echo "❌ curl command failed"
